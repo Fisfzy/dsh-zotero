@@ -84,8 +84,8 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
   const [config, setConfig] = useState<Record<string, unknown>>({})
   const [form, setForm] = useState<Record<string, string>>({})
   const [note, setNote] = useState('')
-  const [pdfKey, setPdfKey] = useState<string | null>(null)
-  const [pdfTitle, setPdfTitle] = useState('')
+  /** 阅读模式：{论文 key, 标题, PDF 附件 key}；非空时面板主体 = PDF 阅读器。 */
+  const [reading, setReading] = useState<{ key: string; title: string; attachmentKey: string } | null>(null)
   const sessionRef = useRef(props.sessionId)
   useEffect(() => {
     if (props.sessionId && props.sessionId !== sessionRef.current) {
@@ -128,12 +128,13 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
     }
   }, [tab])
 
-  async function doSearch(): Promise<void> {
+  /** 检索（参数显式传入，避免 setState 闭包读到旧值）。 */
+  async function runSearch(q: string, coll: string): Promise<void> {
     setBusy('检索…')
     try {
       const qs = new URLSearchParams()
-      if (query.trim()) qs.set('q', query.trim())
-      if (collectionKey) qs.set('collection', collectionKey)
+      if (q.trim()) qs.set('q', q.trim())
+      if (coll) qs.set('collection', coll)
       const tree = await apiGet(`/tree${qs.size ? `?${qs.toString()}` : ''}`)
       setRecent((tree.recent ?? []).filter((i: RecentItem) => i.itemType !== 'attachment'))
     } catch (err: any) {
@@ -142,17 +143,23 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
     setBusy('')
   }
 
+  async function doSearch(): Promise<void> {
+    await runSearch(query, collectionKey)
+  }
+
+  /** 点论文 → 整页进入 PDF 阅读模式（有 PDF 附件时）。 */
   async function openItem(key: string): Promise<void> {
-    setDetail({ loading: true })
+    setBusy('打开条目…')
     try {
       const got = await apiGet(`/item?key=${encodeURIComponent(key)}`)
+      setBusy('')
       setDetail(got)
       const pdf = (got.item?.attachments ?? []).find((a: any) => a.isPdf)
       if (pdf) {
-        setPdfKey(null)
-        setPdfTitle('')
+        setReading({ key, title: got.item?.title ?? '', attachmentKey: pdf.key })
       }
     } catch (err: any) {
+      setBusy('')
       setDetail({ error: String(err?.message ?? err) })
     }
   }
@@ -289,111 +296,140 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
         {note ? <div className="dshz-banner ok">{note}</div> : null}
         {tab === 'lib' && (
           <>
-            {pdfKey && (
-              <div className="dshz-pdf">
-                <div className="bar">
-                  <button className="dshz-btn primary" onClick={() => void openPdf(pdfKey, 'zotero')}>Zotero 阅读器</button>
-                  <button className="dshz-btn" onClick={() => void openPdf(pdfKey, 'system')}>系统打开</button>
-                  <button className="dshz-btn" onClick={() => setPdfKey(null)}>关闭</button>
-                </div>
-                <iframe title={pdfTitle || 'PDF'} src={`${API}/pdf?key=${encodeURIComponent(pdfKey)}`} />
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-              <input
-                className="dshz-input"
-                placeholder="检索标题/作者/标签/全文…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') void doSearch() }}
-              />
-              <button className="dshz-btn primary" onClick={() => void doSearch()}>检索</button>
-            </div>
-            <select
-              className="dshz-sel"
-              style={{ marginBottom: 6 }}
-              value={collectionKey}
-              onChange={(e) => { setCollectionKey(e.target.value); void doSearch() }}
-            >
-              <option value="">全部收藏夹</option>
-              {collections.map((c) => (
-                <option key={c.key} value={c.key}>
-                  {'│ '.repeat(Math.min(c.depth, 8))}{c.name} ({c.itemCount ?? '?'})
-                </option>
-              ))}
-            </select>
-            <div className="dshz-note" style={{ marginBottom: 6 }}>
-              点击条目查看详情；PDF 徽章点击 = 面板内预览；「开读」一键唤起 Chat 精读。
-            </div>
-            {recent.length === 0 && <div className="dshz-null">暂无数据 — 点右上「刷新」</div>}
-            {recent.map((i) => (
-              <div className="dshz-row" key={i.key} onClick={() => void openItem(i.key)}>
-                <div className="t">{i.title || '(无标题)'}</div>
-                <div className="m">
-                  <span className="dshz-badge">{i.itemType}</span>
-                  {i.year ? <span>{i.year}</span> : null}
-                </div>
-              </div>
-            ))}
-            {detail && (
-              <div className="dshz-row" style={{ cursor: 'default', background: '#1e232a' }}>
-                {detail.loading ? <div className="dshz-null">加载条目…</div> : !detailItem ? (
-                  <div className="dshz-null">{String(detail.error ?? '加载失败')}</div>
-                ) : (
-                  <>
-                    <div className="t">{detailItem.title || '(无标题)'}</div>
-                    <div className="dshz-kv" style={{ marginTop: 6, lineHeight: 1.7 }}>
-                      {detailItem.creators?.length ? (
-                        <div>作者：<b>{detailItem.creators.map((c: any) => c.fullName).join(', ')}</b></div>
-                      ) : null}
-                      {(detailItem.year || detailItem.publicationTitle || detailItem.doi) ? (
-                        <div>
-                          {detailItem.year ? <b>{detailItem.year}</b> : null}
-                          {detailItem.publicationTitle ? ` · ${detailItem.publicationTitle}` : ''}
-                          {detailItem.doi ? ` · DOI ${detailItem.doi}` : ''}
-                        </div>
-                      ) : null}
-                      {detailItem.tags?.length ? <div>标签：{detailItem.tags.join(', ')}</div> : null}
-                      {detailItem.abstractNote ? (
-                        <div style={{ maxHeight: 96, overflow: 'auto' }}>
-                          摘要：{detailItem.abstractNote.slice(0, 900)}
-                        </div>
-                      ) : null}
+            {reading ? (
+              /* ── 阅读模式：面板主体 = PDF 阅读器 ── */
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 480 }}>
+                <div className="dshz-row" style={{ cursor: 'default', background: '#1e232a', marginTop: 0 }}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <button className="dshz-btn" onClick={() => setReading(null)}>← 列表</button>
+                    <span className="dshz-note" style={{ flex: 1, minWidth: 120, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dshz-fg)', fontSize: 12 }}>
+                      {reading.title || 'PDF'}
+                    </span>
+                    <button className="dshz-btn primary" onClick={() => void startRead(reading.key)}>开读 · 唤起Chat</button>
+                    <button className="dshz-btn" onClick={() => void summarizeItem(reading.key)}>概述</button>
+                    <button className="dshz-btn" onClick={() => void injectItem(reading.key, 'qa')}>送入全文</button>
+                    <button className="dshz-btn" onClick={() => void readItem(reading.key)}>读全文</button>
+                    <button className="dshz-btn" onClick={() => void openPdf(reading.attachmentKey, 'zotero')}>Zotero 阅读器</button>
+                    <button className="dshz-btn" onClick={() => void openPdf(reading.attachmentKey, 'system')}>系统打开</button>
+                  </div>
+                  {detail?.item && (
+                    <div className="dshz-kv" style={{ marginTop: 6 }}>
+                      {detail.item.creators?.length ? <span>作者: {detail.item.creators.map((c: any) => c.fullName).join(', ')} · </span> : null}
+                      {detail.item.year ? <span>{detail.item.year} · </span> : null}
+                      {detail.item.publicationTitle ? <span>{detail.item.publicationTitle} · </span> : null}
+                      {detail.item.doi ? <span>DOI {detail.item.doi}</span> : null}
                     </div>
-                    <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                      <button className="dshz-btn primary" onClick={() => void startRead(detailItem.key)}>开读 · 唤起Chat</button>
-                      <button className="dshz-btn" onClick={() => void injectItem(detailItem.key, 'meta')}>送入当前对话</button>
-                      <button className="dshz-btn" onClick={() => void injectItem(detailItem.key, 'qa')}>送入全文·精读问答</button>
-                      <button className="dshz-btn" onClick={() => void readItem(detailItem.key)}>读全文</button>
-                      <button className="dshz-btn" onClick={() => void summarizeItem(detailItem.key)}>概述</button>
+                  )}
+                </div>
+                <iframe
+                  title={reading.title || 'PDF'}
+                  src={`${API}/pdf?key=${encodeURIComponent(reading.attachmentKey)}`}
+                  style={{ flex: 1, width: '100%', border: '1px solid var(--dshz-line)', borderRadius: 8, background: '#111' }}
+                />
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                  <input
+                    className="dshz-input"
+                    placeholder="检索标题/作者/标签/全文…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void doSearch() }}
+                  />
+                  <button className="dshz-btn primary" onClick={() => void doSearch()}>检索</button>
+                </div>
+                <select
+                  className="dshz-sel"
+                  style={{ marginBottom: 6 }}
+                  value={collectionKey}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setCollectionKey(v)
+                    void runSearch(query, v)
+                  }}
+                >
+                  <option value="">全部收藏夹</option>
+                  {collections.map((c) => (
+                    <option key={c.key} value={c.key}>
+                      {'│ '.repeat(Math.min(c.depth, 8))}{c.name} ({c.itemCount ?? '?'})
+                    </option>
+                  ))}
+                </select>
+                <div className="dshz-note" style={{ marginBottom: 6 }}>
+                  点击条目 = 进入 PDF 阅读（列页面切换）；无 PDF 的条目显示详情卡；「开读」一键唤起 Chat 精读。
+                </div>
+                {recent.length === 0 && <div className="dshz-null">暂无数据 — 点右上「刷新」</div>}
+                {recent.map((i) => (
+                  <div className="dshz-row" key={i.key} onClick={() => void openItem(i.key)}>
+                    <div className="t">{i.title || '(无标题)'}</div>
+                    <div className="m">
+                      <span className="dshz-badge">{i.itemType}</span>
+                      {i.year ? <span>{i.year}</span> : null}
                     </div>
-                    {detailItem.attachments?.length ? (
-                      <div className="dshz-note" style={{ marginTop: 8 }}>
-                        附件 {detailItem.attachments.length}：
-                        {detailItem.attachments.map((a: any) => (
-                          <span
-                            key={a.key}
-                            className={`dshz-badge ${a.isPdf ? 'pdf' : ''}`}
-                            style={a.isPdf ? { cursor: 'pointer' } : undefined}
-                            title={a.isPdf ? '面板内预览' : undefined}
-                            onClick={a.isPdf ? () => { setPdfKey(a.key); setPdfTitle(a.title ?? '') } : undefined}
-                          >
-                            {String(a.title ?? '').slice(0, 26)}{a.isPdf ? ' · PDF▶' : ''}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                    {detail.summary ? (
-                      <div className="dshz-note" style={{ marginTop: 8, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
-                        {detail.summary}
-                      </div>
-                    ) : null}
-                  </>
+                  </div>
+                ))}
+                {detail && (
+                  <div className="dshz-row" style={{ cursor: 'default', background: '#1e232a' }}>
+                    {detail.loading ? <div className="dshz-null">加载条目…</div> : !detailItem ? (
+                      <div className="dshz-null">{String(detail.error ?? '加载失败')}</div>
+                    ) : (
+                      <>
+                        <div className="t">{detailItem.title || '(无标题)'}</div>
+                        <div className="dshz-kv" style={{ marginTop: 6, lineHeight: 1.7 }}>
+                          {detailItem.creators?.length ? (
+                            <div>作者：<b>{detailItem.creators.map((c: any) => c.fullName).join(', ')}</b></div>
+                          ) : null}
+                          {(detailItem.year || detailItem.publicationTitle || detailItem.doi) ? (
+                            <div>
+                              {detailItem.year ? <b>{detailItem.year}</b> : null}
+                              {detailItem.publicationTitle ? ` · ${detailItem.publicationTitle}` : ''}
+                              {detailItem.doi ? ` · DOI ${detailItem.doi}` : ''}
+                            </div>
+                          ) : null}
+                          {detailItem.tags?.length ? <div>标签：{detailItem.tags.join(', ')}</div> : null}
+                          {detailItem.abstractNote ? (
+                            <div style={{ maxHeight: 96, overflow: 'auto' }}>
+                              摘要：{detailItem.abstractNote.slice(0, 900)}
+                            </div>
+                          ) : null}
+                        </div>
+                        <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button className="dshz-btn primary" onClick={() => void startRead(detailItem.key)}>开读 · 唤起Chat</button>
+                          <button className="dshz-btn" onClick={() => void injectItem(detailItem.key, 'meta')}>送入当前对话</button>
+                          <button className="dshz-btn" onClick={() => void injectItem(detailItem.key, 'qa')}>送入全文·精读问答</button>
+                          <button className="dshz-btn" onClick={() => void readItem(detailItem.key)}>读全文</button>
+                          <button className="dshz-btn" onClick={() => void summarizeItem(detailItem.key)}>概述</button>
+                        </div>
+                        {detailItem.attachments?.length ? (
+                          <div className="dshz-note" style={{ marginTop: 8 }}>
+                            附件 {detailItem.attachments.length}：
+                            {detailItem.attachments.map((a: any) => (
+                              <span
+                                key={a.key}
+                                className={`dshz-badge ${a.isPdf ? 'pdf' : ''}`}
+                                style={a.isPdf ? { cursor: 'pointer' } : undefined}
+                                title={a.isPdf ? '面板内预览' : undefined}
+                                onClick={a.isPdf ? () => setReading({ key: detailItem.key, title: detailItem.title || '', attachmentKey: a.key }) : undefined}
+                              >
+                                {String(a.title ?? '').slice(0, 26)}{a.isPdf ? ' · PDF▶' : ''}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {detail.summary ? (
+                          <div className="dshz-note" style={{ marginTop: 8, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                            {detail.summary}
+                          </div>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
                 )}
-              </div>
+              </>
             )}
-          </>
-        )}
+            </>
+          )}
         {tab === 'out' && (
           <>
             {artifacts.length === 0 ? <div className="dshz-null">暂无产出物 — 读全文/概述后自动沉淀在这里</div> : null}

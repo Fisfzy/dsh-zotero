@@ -240,7 +240,8 @@ async function treeOf(client: ZoteroClient, query: URLSearchParams) {
     limit: 40,
     query: q || undefined,
     qmode: q ? 'everything' : undefined,
-    collectionKey: q ? undefined : collection || undefined,
+    // q 与 collection 可并存（Local API 支持组合过滤）。
+    collectionKey: collection || undefined,
   })
   const c = await client.scoped().collections()
   // 列表隐藏纯附件行（它们没有独立的文献价值）。

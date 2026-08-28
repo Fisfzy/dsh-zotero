@@ -486,7 +486,6 @@ export class ZoteroClient {
       q: params.query,
       qmode,
       tag: params.tag,
-      collection: params.collectionKey,
       itemType: params.itemType,
       sort: params.sort,
       direction: params.direction,
@@ -494,8 +493,14 @@ export class ZoteroClient {
       start: params.start,
     }
     try {
+      // Zotero API 的收藏夹过滤走 /collections/{key}/items（items?collection= 不是
+      // 官方过滤参数，实测被忽略）。q/qmode/tag 等仍可组合传递。
+      // 注意 buildItemsPath 会统一追加 /items，这里传"库根"。
+      const basePath = params.collectionKey
+        ? `${src.base}${src.libraryPath}/collections/${encodeURIComponent(params.collectionKey)}`
+        : `${src.base}${src.libraryPath}`
       const r = await this.fetchJson(
-        this.buildItemsPath(`${src.base}${src.libraryPath}`, query),
+        this.buildItemsPath(basePath, query),
         src.headers,
       )
       const items = (Array.isArray(r.json) ? r.json : []).map((i: RawItem) =>
