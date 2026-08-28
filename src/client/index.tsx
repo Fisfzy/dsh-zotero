@@ -211,12 +211,17 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
     }
   }
 
-  async function openPdfExternal(attachmentKey: string): Promise<void> {
-    setBusy('打开 PDF…')
-    const r = await apiGet(`/open?key=${encodeURIComponent(attachmentKey)}`)
+  async function openPdf(attachmentKey: string, target: 'zotero' | 'system' = 'zotero'): Promise<void> {
+    setBusy(target === 'zotero' ? '唤起 Zotero 阅读器…' : '系统打开 PDF…')
+    const r = await apiGet(`/open?key=${encodeURIComponent(attachmentKey)}&target=${target}`)
     setBusy('')
-    if (r.ok) setNote(`📄 已在系统阅读器打开：${r.path}`)
-    else setNote(`⚠️ ${r.error ?? '打开失败'}`)
+    if (r.ok) {
+      setNote(target === 'zotero'
+        ? '📖 已在 Zotero 内置阅读器打开（侧边栏注释/文本选择可用）。'
+        : `📄 已用系统默认程序打开：${r.path ?? ''}`)
+    } else {
+      setNote(`⚠️ ${r.error ?? '打开失败'}`)
+    }
   }
 
   async function saveConfig(): Promise<void> {
@@ -287,7 +292,8 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
             {pdfKey && (
               <div className="dshz-pdf">
                 <div className="bar">
-                  <button className="dshz-btn" onClick={() => void openPdfExternal(pdfKey)}>外部打开</button>
+                  <button className="dshz-btn primary" onClick={() => void openPdf(pdfKey, 'zotero')}>Zotero 阅读器</button>
+                  <button className="dshz-btn" onClick={() => void openPdf(pdfKey, 'system')}>系统打开</button>
                   <button className="dshz-btn" onClick={() => setPdfKey(null)}>关闭</button>
                 </div>
                 <iframe title={pdfTitle || 'PDF'} src={`${API}/pdf?key=${encodeURIComponent(pdfKey)}`} />

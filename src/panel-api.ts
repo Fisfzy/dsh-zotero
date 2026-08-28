@@ -84,17 +84,27 @@ async function handle(
         return
       }
       if (path === '/open' && query.get('key')) {
-        const p = await client.resolveAttachmentPath(query.get('key')!)
-        if (!p) return send(res, 200, { ok: false, error: '找不到附件文件路径' })
+        const attachmentKey = query.get('key')!
+        const target = query.get('target') === 'system' ? 'system' : 'zotero'
+        const p = await client.resolveAttachmentPath(attachmentKey)
         try {
-          // Best-effort OS open（Windows start / macOS open / linux xdg-open）。
           const { spawn } = await import('node:child_process')
+          if (target === 'zotero') {
+            // Zotero URL scheme：在 Zotero 内置阅读器打开该附件（正文/注释/文本选择）。
+            const uri = `zotero://select/items/${attachmentKey}`
+            const cmd = process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+            const args = process.platform === 'win32' ? ['/c', 'start', '', uri] : [uri]
+            spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+            return send(res, 200, { ok: true, target, uri, path: p ?? '' })
+          }
+          // System default handler (Windows start / macOS open / linux xdg-open).
+          if (!p) return send(res, 200, { ok: false, error: '找不到附件文件路径' })
           const cmd = process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open'
           const args = process.platform === 'win32' ? ['/c', 'start', '', p] : [p]
           spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref()
-          return send(res, 200, { ok: true, path: p })
+          return send(res, 200, { ok: true, target, path: p })
         } catch (err: any) {
-          return send(res, 200, { ok: false, error: String(err?.message ?? err), path: p })
+          return send(res, 200, { ok: false, error: String(err?.message ?? err), path: p ?? '' })
         }
       }
       if (path === '/artifacts') return send(res, 200, { artifacts: readArtifacts(currentConfig()) })
