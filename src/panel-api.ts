@@ -11,9 +11,15 @@
  *   POST /inject-context     push paper context into the current conversation
  *   GET  /config             plugin config snapshot (secrets masked)
  *   GET/POST /artifacts      产出物区（库内 JSON 持久化）
+ * M3.2 文献聊天（独立浮动窗口 + 每篇论文一个会话 + History）：
+ *   GET  /chat-sessions     History（论文会话 + 文献库会话）
+ *   POST /chat-open         打开/复用论文会话（注入全文，可选发精读指令）
+ *   POST /chat-open-library 打开/复用文献库会话（注入库级引导）
+ *   POST /chat-send         发消息（冷会话自动恢复）
+ *   GET  /chat-messages     文献会话消息缓存（host session/event 订阅累积）
  */
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type LlmService from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ZoteroClient } from './zotero/client.ts'
@@ -29,7 +35,310 @@ export const API_PREFIX = '/@dsh-external/dsh-zotero/api'
 const READ_PROMPT =
   '「Zotero 开读」——请以精读模式阅读上面注入的论文：先一句话概述核心贡献，再按章节提炼要点（方法/关键结果/局限），最后给 3 个可深入追问的问题。信息不足时调用 zotero_read_pdf / zotero_summarize 补充阅读。'
 
+const LIBRARY_MODE_PROMPT =
+  '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_read_pdf / zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字）。一次不要读取超过 2 篇全文，保持回答有据可查。'
+
 const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey'])
+
+/* ── 文献聊天（M3.2 rev2）：每篇论文一个会话 + History 列表 ────────────
+ * 会话 id 确定性（zotero-paper-<itemKey> / zotero-library），映射持久化
+ * 在 chat-sessions.json；消息缓存仍由 host session/event 订阅累积。
+ * 参考同环境已装配的 dsh-better-sidebar（ctx.get('agents') + create/resume）。
+ */
+
+interface ChatPaperEntry {
+  itemKey: string
+  title: string
+  sessionId: string
+  injectedAt: number
+  at: number
+}
+
+interface ChatLibraryEntry {
+  sessionId: string
+  injectedAt: number
+  at: number
+}
+
+interface ChatSessionStore {
+  papers: ChatPaperEntry[]
+  library?: ChatLibraryEntry
+}
+
+const LIBRARY_SESSION_ID = 'zotero-library'
+
+function chatStorePath(): string {
+  return join(resolveCacheDir(currentConfig()), 'chat-sessions.json')
+}
+
+function readChatStore(): ChatSessionStore {
+  try {
+    const p = chatStorePath()
+    if (!existsSync(p)) return { papers: [] }
+    const raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<ChatSessionStore>
+    return {
+      papers: Array.isArray(raw.papers)
+        ? raw.papers.filter((x): x is ChatPaperEntry => Boolean(x && typeof x.sessionId === 'string' && typeof x.itemKey === 'string'))
+        : [],
+      ...(raw.library && typeof raw.library.sessionId === 'string' ? { library: raw.library } : {}),
+    }
+  } catch {
+    return { papers: [] }
+  }
+}
+
+function writeChatStore(store: ChatSessionStore): void {
+  try {
+    mkdirSync(dirname(chatStorePath()), { recursive: true })
+    writeFileSync(chatStorePath(), JSON.stringify(store, null, 2), 'utf8')
+  } catch { /* best-effort */ }
+}
+
+/** 文献会话消息缓存（host session/event 订阅写入；面板轮询读取）。 */
+export interface ChatLogMsg {
+  kind: 'user' | 'assistant' | 'tool'
+  text: string
+  name?: string
+  running?: boolean
+  ok?: boolean
+  at: number
+}
+const chatLogs = new Map<string, ChatLogMsg[]>()
+
+export function pushChatLog(sessionId: string, msg: ChatLogMsg): void {
+  const list = chatLogs.get(sessionId) ?? []
+  const last = list[list.length - 1]
+  // assistant 流式累积：chunk 追加到 running 尾部；完整 message 替换该 running 条。
+  if (msg.kind === 'assistant' && msg.running && last?.kind === 'assistant' && last.running) {
+    last.text += msg.text
+    last.at = msg.at
+    chatLogs.set(sessionId, list)
+    return
+  }
+  if (msg.kind === 'assistant' && !msg.running && msg.text && last?.kind === 'assistant' && last.running) {
+    last.text = msg.text
+    last.running = false
+    last.at = msg.at
+    chatLogs.set(sessionId, list)
+    return
+  }
+  // tool/result 落定：替换同名的 running 工具行（避免重复）。
+  if (msg.kind === 'tool' && !msg.running && last?.kind === 'tool' && last.running && last.name === msg.name) {
+    last.running = false
+    last.ok = msg.ok
+    last.at = msg.at
+    chatLogs.set(sessionId, list)
+    return
+  }
+  list.push(msg)
+  if (list.length > 400) list.splice(0, list.length - 400)
+  chatLogs.set(sessionId, list)
+}
+
+export function chatMessages(sessionId: string): ChatLogMsg[] {
+  return chatLogs.get(sessionId) ?? []
+}
+
+/* ── agents 服务结构类型（不依赖 @deepseek-ai/dsh-agent 类型） ── */
+
+interface AgentLike {
+  inject(msg: unknown): void
+  followup(msg: unknown): void
+  cancel?(opts?: unknown): void
+  session?: { header?: { cwd?: string }; id?: string }
+}
+
+interface AgentsLike {
+  get(id: unknown): AgentLike | undefined
+  create(opts: {
+    sessionId: string
+    meta?: { cwd?: string; parentSession?: string; origin?: 'subagent' }
+    signal?: AbortSignal
+  }): Promise<{ agent: AgentLike; dispose(): Promise<void> }>
+  resume(opts: {
+    resumeSessionId: string
+    signal?: AbortSignal
+  }): Promise<{ agent: AgentLike; dispose(): Promise<void> }>
+}
+
+function agentsOf(deps: PanelApiDeps): AgentsLike | undefined {
+  return deps.agents as AgentsLike | undefined
+}
+
+/**
+ * 激活（或恢复）一个文献会话：live 优先；否则 create（新 id）失败则
+ * resume（已持久化、web 重启后的冷会话）。
+ */
+async function ensureLiveAgent(
+  agents: AgentsLike,
+  sessionId: string,
+  cwd?: string,
+): Promise<AgentLike> {
+  const live = agents.get(sessionId)
+  if (live) return live
+  if (agents.create) {
+    try {
+      const handle = await agents.create({
+        sessionId,
+        ...(cwd ? { meta: { cwd } } : {}),
+        signal: AbortSignal.timeout(20000),
+      })
+      return handle.agent
+    } catch { /* id 已持久化或冲突 → 走 resume */ }
+  }
+  if (agents.resume) {
+    try {
+      const handle = await agents.resume({ resumeSessionId: sessionId, signal: AbortSignal.timeout(20000) })
+      return handle.agent
+    } catch (err: unknown) {
+      throw new Error(`文献会话激活失败: ${String((err as Error)?.message ?? err)}`)
+    }
+  }
+  throw new Error('agents 服务不可用（create/resume 均缺失）')
+}
+
+function injectText(agent: AgentLike, text: string): void {
+  agent.inject({
+    content: [{ type: 'text', text }],
+    source: { kind: 'plugin', plugin: PLUGIN_ID },
+  })
+}
+
+function followupText(agent: AgentLike, text: string): void {
+  agent.followup(createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }))
+}
+
+/** 从 body.parent（主会话 id）解析 cwd：live agent 直读，冷会话走 sessionPersistence.inspect。 */
+async function parentCwdOf(deps: PanelApiDeps, body: Record<string, unknown>): Promise<string | undefined> {
+  const parent = String(body.parent ?? '')
+  if (!parent) return undefined
+  try {
+    const agent = agentsOf(deps)?.get(parent)
+    const cwd = agent?.session?.header?.cwd
+    if (cwd) return cwd
+  } catch { /* fall through */ }
+  try {
+    const persistence = deps.sessionPersistence as
+      | { inspect?(id: string): Promise<{ meta?: { cwd?: string } } | undefined> }
+      | undefined
+    const inspected = await persistence?.inspect?.(parent)
+    if (inspected?.meta?.cwd) return inspected.meta.cwd
+  } catch { /* fall through */ }
+  return undefined
+}
+
+/** 打开（或复用）某论文的文献会话：注入全文（首次/force），可选送精读指令。 */
+export async function openPaperChatSession(
+  deps: PanelApiDeps,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; sessionId?: string; chars?: number; error?: string; cwd?: string }> {
+  const agents = agentsOf(deps)
+  if (!agents?.create && !agents?.resume) return { ok: false, error: 'agents 服务不可用' }
+  const itemKey = String(body.itemKey ?? '')
+  if (!itemKey) return { ok: false, error: '需要 itemKey' }
+  const title = String(body.title ?? '') || itemKey
+  const store = readChatStore()
+  const entry = store.papers.find((p) => p.itemKey === itemKey)
+  const sessionId = entry?.sessionId ?? `zotero-paper-${itemKey}`
+  const cwd = String(body.cwd ?? '') || (await parentCwdOf(deps, body))
+  console.log(`[dsh-zotero] chat-open itemKey=${itemKey} parent=${String(body.parent ?? '')} cwd=${JSON.stringify(cwd)} via=${body.cwd ? 'body' : 'parent'}`)
+
+  let agent: AgentLike
+  try {
+    agent = await ensureLiveAgent(agents, sessionId, cwd)
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+
+  const alreadyInjected = Boolean(entry && entry.injectedAt > 0)
+  let chars = 0
+  if (!alreadyInjected || body.force) {
+    const built = await buildPaperContext(deps, { ...body, itemKey })
+    if (!built.ok) return { ok: false, sessionId, error: built.error ?? '构建论文上下文失败' }
+    injectText(agent, built.text)
+    chars = built.text.length
+    writeChatStore({
+      papers: [
+        ...store.papers.filter((p) => p.itemKey !== itemKey),
+        { itemKey, title, sessionId, injectedAt: Date.now(), at: Date.now() },
+      ],
+      ...(store.library ? { library: store.library } : {}),
+    })
+  }
+  if (body.sendRead) followupText(agent, READ_PROMPT)
+  // History 标题跟随最新打开时的标题（已存在会话也更新）。
+  if (entry && body.title && body.title !== entry.title) {
+    writeChatStore({
+      papers: [
+        ...store.papers.filter((p) => p.itemKey !== itemKey),
+        { ...entry, title: String(body.title), at: Date.now() },
+      ],
+      ...(store.library ? { library: store.library } : {}),
+    })
+  }
+  return { ok: true, sessionId, chars, cwd: cwd ?? '' }
+}
+
+/** 打开（或复用）「文献库对话」会话：注入库级引导（仅首次）。 */
+export async function openLibraryChatSession(
+  deps: PanelApiDeps,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; sessionId?: string; chars?: number; error?: string }> {
+  const agents = agentsOf(deps)
+  if (!agents?.create && !agents?.resume) return { ok: false, error: 'agents 服务不可用' }
+  const cwd = String(body.cwd ?? '') || (await parentCwdOf(deps, body))
+  const store = readChatStore()
+  const entry = store.library
+  const sessionId = entry?.sessionId ?? LIBRARY_SESSION_ID
+
+  let agent: AgentLike
+  try {
+    agent = await ensureLiveAgent(agents, sessionId, cwd)
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+
+  let chars = 0
+  if (!entry?.injectedAt || body.force) {
+    injectText(agent, `【Zotero 文献库对话模式】\n${LIBRARY_MODE_PROMPT}`)
+    chars = LIBRARY_MODE_PROMPT.length
+    writeChatStore({
+      papers: store.papers,
+      library: { sessionId, injectedAt: Date.now(), at: Date.now() },
+    })
+  }
+  if (body.sendIntro) {
+    followupText(agent, '你好！请先简单介绍你能做什么，并给我 3 个可立即使用的示例问题。')
+  }
+  return { ok: true, sessionId, chars }
+}
+
+/** 向文献会话发送一条消息（冷会话自动恢复）。 */
+export async function sendChatMessage(
+  deps: PanelApiDeps,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; error?: string }> {
+  const agents = agentsOf(deps)
+  if (!agents) return { ok: false, error: 'agents 服务不可用' }
+  const sessionId = String(body.sessionId ?? '')
+  const text = String(body.text ?? '').trim()
+  if (!sessionId || !text) return { ok: false, error: '需要 sessionId + text' }
+  let agent: AgentLike
+  try {
+    agent = await ensureLiveAgent(agents, sessionId, String(body.cwd ?? '') || undefined)
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+  try {
+    followupText(agent, text)
+    return { ok: true }
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+}
 
 export interface PanelApiDeps {
   client: ZoteroClient
@@ -37,6 +346,8 @@ export interface PanelApiDeps {
   agentDefaultModel: { currentSelection(): ResolvedModel } | undefined
   /** Host agent service (optional) — used by /inject-context. */
   agents: unknown
+  /** Host session persistence (optional) — 冷会话 cwd 解析（chat-open）。 */
+  sessionPersistence?: unknown
 }
 
 export interface PanelRouteHandler {
@@ -79,6 +390,13 @@ async function handle(
         }))
       }
       if (path === '/config') return send(res, 200, maskConfig(currentConfig()))
+      if (path === '/chat-sessions') {
+        const store = readChatStore()
+        return send(res, 200, { papers: store.papers, library: store.library ?? null })
+      }
+      if (path === '/chat-messages' && query.get('sessionId')) {
+        return send(res, 200, { messages: chatMessages(query.get('sessionId')!) })
+      }
       if (path === '/pdf' && query.get('key')) {
         await streamPdf(req, res, client, query.get('key')!)
         return
@@ -119,6 +437,9 @@ async function handle(
       }
       if (path === '/inject-context') return send(res, 200, await injectContext(deps, body))
       if (path === '/start-read') return send(res, 200, await startRead(deps, body))
+      if (path === '/chat-open') return send(res, 200, await openPaperChatSession(deps, body))
+      if (path === '/chat-open-library') return send(res, 200, await openLibraryChatSession(deps, body))
+      if (path === '/chat-send') return send(res, 200, await sendChatMessage(deps, body))
       if (path === '/config') {
         writeOverlay(body as Partial<ZoteroConfig>)
         const next = composeConfig()

@@ -6,11 +6,37 @@
  * 「开读」与「送入」都走 /inject-context & /start-read（host agent.inject/followup）。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
 import type { SlotsService } from '@deepseek-ai/dsh-client-ui-slots'
+import { CSS } from './theme'
+import { ChatWindow, dispatchChatOpen } from './ChatWindow'
 
-type ClientContext = { slots: SlotsService }
+/** ClientContext 需要的最小签名（sessions.create/list 见 dsh-api-session-controller/client）。 */
+type ClientContext = {
+  slots: SlotsService
+  sessions: {
+    create(opts?: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
+    list: {
+      getSnapshot(): { byId: Record<string, { cwd?: string }> }
+    }
+  }
+}
 
-export const inject = ['slots']
+export const inject = ['slots', 'sessions']
+
+/** 浮动文献聊天窗的独立 React root（挂 document.body；不占面板 tab）。 */
+let WIN_ROOT: Root | null = null
+/** apply() 注入的 client sessions 服务（dispatch 时取父会话 cwd）。 */
+let SESSIONS: ClientContext['sessions'] | null = null
+
+/** 当前面板会话的 cwd（文献会话创建时作为 meta.cwd，persona 提示词变量需要）。 */
+function currentCwd(sessionId: string): string {
+  try {
+    return SESSIONS?.list?.getSnapshot()?.byId?.[sessionId]?.cwd ?? ''
+  } catch {
+    return ''
+  }
+}
 
 const API = '/@dsh-external/dsh-zotero/api'
 
@@ -26,45 +52,6 @@ async function apiPost(path: string, body: unknown): Promise<any> {
   })
   return res.json()
 }
-
-const CSS = `
-.dshz{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12.5px;--dshz-bg:#1b1d21;--dshz-panel:#24272c;--dshz-line:#33373e;--dshz-fg:#d8dbe0;--dshz-dim:#8a919c;--dshz-accent:#4f8cff;}
-.dshz *{box-sizing:border-box}
-.dshz-h{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--dshz-line);background:var(--dshz-bg);position:sticky;top:0;z-index:3}
-.dshz-h .dot{width:8px;height:8px;border-radius:50%;background:var(--dshz-dim);flex:none}
-.dshz-h b{font-size:12px;color:var(--dshz-fg)}
-.dshz-h .st{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dshz-dim);font-size:11px}
-.dshz-btn{background:#2a2e35;color:var(--dshz-fg);border:1px solid var(--dshz-line);border-radius:6px;padding:4px 8px;font-size:11.5px;cursor:pointer;white-space:nowrap}
-.dshz-btn:hover{background:#343a43}
-.dshz-btn.primary{background:var(--dshz-accent);border-color:transparent;color:#fff}
-.dshz-btn:disabled{opacity:.5;cursor:default}
-.dshz-tabs{display:flex;gap:2px;padding:6px 8px 0;border-bottom:1px solid var(--dshz-line)}
-.dshz-tab{padding:5px 10px;border-radius:6px 6px 0 0;cursor:pointer;color:var(--dshz-dim);border:1px solid transparent}
-.dshz-tab.on{color:var(--dshz-accent);border-color:var(--dshz-line);border-bottom-color:transparent;background:var(--dshz-panel)}
-.dshz-b{flex:1;min-height:0;overflow:auto;background:var(--dshz-panel);padding:8px}
-.dshz-row{padding:7px 8px;border:1px solid var(--dshz-line);border-radius:8px;margin-bottom:6px;background:#202329;cursor:pointer}
-.dshz-row:hover{border-color:var(--dshz-accent)}
-.dshz-row .t{color:var(--dshz-fg);font-size:12.5px;line-height:1.35}
-.dshz-row .m{color:var(--dshz-dim);font-size:11px;margin-top:3px;display:flex;gap:8px;flex-wrap:wrap}
-.dshz-badge{font-size:10px;border-radius:4px;padding:1px 5px;background:#31353d;color:var(--dshz-dim)}
-.dshz-badge.pdf{background:#2c3e50;color:#7fb3ff}
-.dshz-badge.summary{background:#2c3e50;color:#7fb3ff}
-.dshz-input{width:100%;background:#1e2126;border:1px solid var(--dshz-line);border-radius:6px;color:var(--dshz-fg);padding:5px 8px;font-size:12px}
-.dshz-sel{background:#1e2126;border:1px solid var(--dshz-line);border-radius:6px;color:var(--dshz-fg);padding:4px 6px;font-size:11.5px;width:100%}
-.dshz-kv{color:var(--dshz-dim);font-size:11px}
-.dshz-kv b{color:var(--dshz-fg);font-weight:500}
-.dshz-note{color:var(--dshz-dim);font-size:11px;line-height:1.5}
-.dshz-banner{border-radius:6px;padding:6px 8px;font-size:11px;margin-bottom:8px}
-.dshz-banner.err{background:#3a2020;color:#ff9c9c}
-.dshz-banner.ok{background:#1d3324;color:#8fd9a0}
-.dshz-null{padding:18px 8px;text-align:center;color:var(--dshz-dim);font-size:12px}
-.dshz-pdf{position:relative;border:1px solid var(--dshz-line);border-radius:8px;background:#111;margin-bottom:8px;overflow:hidden}
-.dshz-pdf iframe{display:block;width:100%;height:420px;border:0}
-.dshz-pdf .bar{position:absolute;top:4px;right:4px;z-index:2;display:flex;gap:4px}
-.dshz-field{margin-bottom:8px}
-.dshz-field label{display:block;color:var(--dshz-dim);font-size:11px;margin-bottom:2px}
-.dshz-sec{color:var(--dshz-fg);font-size:12px;font-weight:600;margin:10px 0 6px;border-bottom:1px solid var(--dshz-line);padding-bottom:3px}
-`
 
 interface TreeNode { key: string; name: string; depth: number; itemCount?: number }
 interface RecentItem { key: string; title: string; itemType: string; year?: number }
@@ -188,34 +175,13 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
     apiGet('/artifacts').then((x) => setArtifacts(x.artifacts ?? [])).catch(() => {})
   }
 
-  async function injectItem(key: string, mode: 'meta' | 'qa'): Promise<void> {
-    if (!sessionId) {
-      setNote('⚠️ 未拿到当前会话 id——请在对话页打开此面板后重试。')
-      return
-    }
-    setBusy(mode === 'qa' ? '组装全文上下文…' : '组装元数据…')
-    const r = await apiPost('/inject-context', { itemKey: key, mode, sessionId })
-    setBusy('')
-    if (r.ok) {
-      setNote(`✅ 已送入当前对话（${r.chars} 字符）。上下文已进入会话，直接追问精读问题即可。`)
-    } else {
-      setNote(`❌ ${r.error ?? '注入失败'}`)
-    }
-  }
-
-  async function startRead(key: string): Promise<void> {
-    if (!sessionId) {
-      setNote('⚠️ 未拿到当前会话 id——请在对话页打开此面板后重试。')
-      return
-    }
-    setBusy('唤起 Chat 精读（注入全文 + 发送阅读指令）…')
-    const r = await apiPost('/start-read', { itemKey: key, mode: 'qa', sessionId })
-    setBusy('')
-    if (r.ok) {
-      setNote(r.followup ? '🚀 已唤起 Chat：切到「对话」tab，模型正在精读这篇论文。' : `✅ 已注入上下文（${r.chars} 字符）。`)
-    } else {
-      setNote(`❌ ${r.error ?? '开读失败'}`)
-    }
+  /** 开读/送入 → 文献聊天（M3.2 rev2：独立会话，不碰主对话）。
+   *  只 dispatch 事件（带 parent+cwd）；host 调用由 ChatWindow.openPaper 统一发起。 */
+  async function openReadChat(key: string, title: string, sendRead: boolean): Promise<void> {
+    dispatchChatOpen({ target: 'paper', itemKey: key, title, sendRead, parent: sessionId, cwd: currentCwd(sessionId) })
+    setNote(sendRead
+      ? `🚀 已唤起文献 Chat 并开始精读《${title.slice(0, 30)}…》（浮窗右上可拖拽/最小化）`
+      : `✅ 已送入文献 Chat，去浮窗里追问吧。`)
   }
 
   async function openPdf(attachmentKey: string, target: 'zotero' | 'system' = 'zotero'): Promise<void> {
@@ -284,6 +250,7 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
         <span className="dot" style={{ background: dot }} />
         <b>Zotero</b>
         <span className="st" title={statusText}>{statusText}</span>
+        <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>🧠 文献 Chat</button>
         <button className="dshz-btn" onClick={() => void loadBasics()}>刷新</button>
       </div>
       <div className="dshz-tabs">
@@ -305,9 +272,9 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                     <span className="dshz-note" style={{ flex: 1, minWidth: 120, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dshz-fg)', fontSize: 12 }}>
                       {reading.title || 'PDF'}
                     </span>
-                    <button className="dshz-btn primary" onClick={() => void startRead(reading.key)}>开读 · 唤起Chat</button>
+                    <button className="dshz-btn primary" onClick={() => void openReadChat(reading.key, reading.title, true)}>开读 · 唤起Chat</button>
+                    <button className="dshz-btn" onClick={() => void openReadChat(reading.key, reading.title, false)}>送入文献 Chat</button>
                     <button className="dshz-btn" onClick={() => void summarizeItem(reading.key)}>概述</button>
-                    <button className="dshz-btn" onClick={() => void injectItem(reading.key, 'qa')}>送入全文</button>
                     <button className="dshz-btn" onClick={() => void readItem(reading.key)}>读全文</button>
                     <button className="dshz-btn" onClick={() => void openPdf(reading.attachmentKey, 'zotero')}>Zotero 阅读器</button>
                     <button className="dshz-btn" onClick={() => void openPdf(reading.attachmentKey, 'system')}>系统打开</button>
@@ -395,9 +362,8 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                           ) : null}
                         </div>
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          <button className="dshz-btn primary" onClick={() => void startRead(detailItem.key)}>开读 · 唤起Chat</button>
-                          <button className="dshz-btn" onClick={() => void injectItem(detailItem.key, 'meta')}>送入当前对话</button>
-                          <button className="dshz-btn" onClick={() => void injectItem(detailItem.key, 'qa')}>送入全文·精读问答</button>
+                          <button className="dshz-btn primary" onClick={() => void openReadChat(String(detailItem.key), String(detailItem.title ?? ''), true)}>开读 · 唤起Chat</button>
+                          <button className="dshz-btn" onClick={() => void openReadChat(String(detailItem.key), String(detailItem.title ?? ''), false)}>送入文献 Chat</button>
                           <button className="dshz-btn" onClick={() => void readItem(detailItem.key)}>读全文</button>
                           <button className="dshz-btn" onClick={() => void summarizeItem(detailItem.key)}>概述</button>
                         </div>
@@ -530,6 +496,7 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
 }
 
 export function apply(ctx: ClientContext): void {
+  SESSIONS = ctx.sessions
   ctx.effect(
     () =>
       ctx.slots.inject('conversation.view', () =>
@@ -546,4 +513,18 @@ export function apply(ctx: ClientContext): void {
       ),
     '@dsh-external/dsh-zotero: panel',
   )
+
+  // 浮动文献聊天窗：独立 React root（不占面板 tab；关闭=隐藏、会话保留）。
+  ctx.effect(() => {
+    const host = document.createElement('div')
+    host.setAttribute('data-dshz-chat-window', '')
+    document.body.appendChild(host)
+    WIN_ROOT = createRoot(host)
+    WIN_ROOT.render(<ChatWindow />)
+    return () => {
+      try { WIN_ROOT?.unmount() } catch { /* best-effort */ }
+      WIN_ROOT = null
+      host.remove()
+    }
+  }, '@dsh-external/dsh-zotero: chat window')
 }

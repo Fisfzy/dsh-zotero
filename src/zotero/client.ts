@@ -25,6 +25,24 @@ import type {
 
 const FULLTEXT_QMODE = 'everything'
 
+/** 工具返回值必须是 lossless JSON：递归删除 undefined/NaN/非 JSON 值（防工具校验失败）。 */
+export function cleanJson<T>(value: T): T {
+  if (value === undefined) return undefined as unknown as T
+  if (typeof value === 'number' && !Number.isFinite(value)) return null as unknown as T
+  if (typeof value === 'bigint') return String(value) as unknown as T
+  if (value instanceof Date) return value.toISOString() as unknown as T
+  if (Array.isArray(value)) return value.map((v) => cleanJson(v)) as unknown as T
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === undefined) continue
+      out[k] = cleanJson(v)
+    }
+    return out as unknown as T
+  }
+  return value
+}
+
 const HINT_LOCAL_API_DISABLED =
   'Zotero 正在运行但本地 API 未开启（Zotero 9+ 默认关闭）。开启方法：Zotero → Settings（设置）→ Advanced（高级）→ 打开「Config Editor（配置编辑器）」→ 搜索 httpServer.localAPI.enabled → 双击/设为 true；部分版本直接在 Advanced 有「Enable Local API」勾选框。开启后无需重启即可使用；或不开启，改在插件设置里配置 Web API userId/apiKey 以启用降级。'
 
@@ -506,7 +524,7 @@ export class ZoteroClient {
       const items = (Array.isArray(r.json) ? r.json : []).map((i: RawItem) =>
         toSummary(i, src.source),
       )
-      return {
+      return cleanJson({
         source: src.source,
         total: r.total,
         items,
@@ -514,7 +532,7 @@ export class ZoteroClient {
         error: '',
         hint: '',
         qmode,
-      }
+      })
     } catch (err: any) {
       const e = err instanceof ZoteroApiError ? err : new ZoteroApiError(String(err))
       return {
@@ -599,13 +617,13 @@ export class ZoteroClient {
           })
         }
       }
-      return {
+      return cleanJson({
         found: true,
         source: src.source,
         item: { ...summary, attachments, notes, annotations },
         error: '',
         hint: '',
-      }
+      })
     } catch (err: any) {
       const e = err instanceof ZoteroApiError ? err : new ZoteroApiError(String(err))
       return {
@@ -673,13 +691,13 @@ export class ZoteroClient {
         }
       }
       visit(null, 0)
-      return {
+      return cleanJson({
         source: src.source,
         total,
         tree: ordered,
         error: '',
         hint: '',
-      }
+      })
     } catch (err: any) {
       const e = err instanceof ZoteroApiError ? err : new ZoteroApiError(String(err))
       return {

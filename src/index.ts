@@ -20,7 +20,7 @@ import { registerM2Tools } from './tools-m2.ts'
 import { Config } from './config.ts'
 import type { Config as ZoteroConfig } from './config.ts'
 import type { ResolvedModel } from './ml.ts'
-import { API_PREFIX, PLUGIN_ID, panelApiHandler } from './panel-api.ts'
+import { API_PREFIX, PLUGIN_ID, panelApiHandler, pushChatLog } from './panel-api.ts'
 import { composeConfig, setActiveConfig, setBaseConfig } from './runtime.ts'
 
 type HostContext = Context & {
@@ -88,6 +88,7 @@ export function apply(ctx: HostContext, config: ZoteroConfig): void {
             llm: ctx.llm,
             agentDefaultModel,
             agents: ctx.get('agents'),
+            sessionPersistence: ctx.get('sessionPersistence'),
           })(req as never, res as never),
       })
       log(`route registered ${API_PREFIX}`)
@@ -98,6 +99,54 @@ export function apply(ctx: HostContext, config: ZoteroConfig): void {
     }, `${PLUGIN_ID}: panel api route`)
   }
 
+  // ── 文献会话消息缓存（M3.2「对话」tab 面板渲染源） ──
+  // 订阅 session/event：(session, event) 两个参数（session 为对象，用 .id）。
+  const toolNames = new Map<string, string>() // `${sid}:${callId}` -> tool name
+  ctx.on('session/event', (session: unknown, event: any) => {
+    try {
+      const sid = String((session as { id?: unknown })?.id ?? '')
+      if (!sid) return
+      const type = String(event?.type ?? '')
+      const data = event?.data ?? {}
+      if (type === 'user/message') {
+        // 只显示人类消息（注入的 plugin 上下文/续接不刷屏）。
+        if (String(data?.source?.kind ?? '') !== 'user') return
+        const text = extractText(data?.content)
+        if (text) pushChatLog(sid, { kind: 'user', text, at: Date.now() })
+      } else if (type === 'assistant/chunk') {
+        const chunk = data?.chunk
+        if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
+          pushChatLog(sid, { kind: 'assistant', text: chunk.text, running: true, at: Date.now() })
+        }
+      } else if (type === 'assistant/message') {
+        const text = extractText(data?.message?.content)
+        if (text) pushChatLog(sid, { kind: 'assistant', text, running: false, at: Date.now() })
+      } else if (type === 'tool/call') {
+        const callId = String(data?.callId ?? '')
+        const name = String(data?.name ?? 'tool')
+        if (callId) toolNames.set(`${sid}:${callId}`, name)
+        pushChatLog(sid, { kind: 'tool', name, text: '', running: true, ok: undefined, at: Date.now() })
+      } else if (type === 'tool/result') {
+        const block = data?.message?.content?.[0]
+        const callId = String(data?.message?.source?.callId ?? block?.toolCallId ?? '')
+        const name = toolNames.get(`${sid}:${callId}`) ?? 'tool'
+        const ok = !block?.isError && !data?.error
+        pushChatLog(sid, { kind: 'tool', name, text: '', running: false, ok, at: Date.now() })
+      }
+    } catch { /* 事件缓存是尽力而为 */ }
+  })
+
   ctx.logger?.info?.(`${PLUGIN_ID}: mounted (local API base=${client.localBase()})`)
   log('apply done')
+}
+
+function extractText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((c: any) => (c?.text ? String(c.text) : ''))
+      .join('')
+      .trim()
+  }
+  return ''
 }
