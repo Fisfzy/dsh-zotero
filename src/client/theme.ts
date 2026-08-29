@@ -45,11 +45,43 @@ export const CSS = `
 .dshz-win-head{display:flex;align-items:center;gap:6px;padding:6px 8px;background:#23262c;border-bottom:1px solid var(--dshz-line);cursor:move;user-select:none}
 .dshz-win-head b{font-size:12px;color:var(--dshz-fg)}
 .dshz-win-body{display:flex;flex:1;min-height:0}
-.dshz-win-side{width:170px;flex:none;border-right:1px solid var(--dshz-line);background:#1e2126;overflow:auto}
-.dshz-win-side .side-item{padding:6px 8px;font-size:11.5px;color:var(--dshz-dim);cursor:pointer;border-bottom:1px solid #262a30;line-height:1.35}
+.dshz-win-side{width:182px;flex:none;border-right:1px solid var(--dshz-line);background:#1e2126;overflow:auto}
+.dshz-win-side .side-item{display:flex;align-items:center;gap:4px;padding:6px 8px;font-size:11.5px;color:var(--dshz-dim);cursor:pointer;border-bottom:1px solid #262a30;line-height:1.35}
 .dshz-win-side .side-item:hover{background:#262a31}
 .dshz-win-side .side-item.on{background:#2b3444;color:#cfe3ff}
+.dshz-win-side .side-item .side-txt{flex:1;min-width:0;overflow:hidden}
+.dshz-win-side .side-item .side-del{opacity:0;border:0;background:transparent;color:#8a919c;cursor:pointer;font-size:11px;padding:0 2px;flex:none}
+.dshz-win-side .side-item:hover .side-del{opacity:1}
+.dshz-win-side .side-item .side-del:hover{color:#ff9c9c}
 .dshz-win-main{flex:1;min-width:0;display:flex;flex-direction:column}
+/* 顶部：论文标题 + Paper/库 分段切换 */
+.dshz-wt{display:flex;align-items:center;gap:6px;padding:4px 8px;border-bottom:1px solid var(--dshz-line);background:#202329}
+.dshz-ttl{flex:1;min-width:0;font-size:11.5px;color:var(--dshz-fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshz-seg{display:flex;background:#26292f;border:1px solid var(--dshz-line);border-radius:7px;overflow:hidden;flex:none}
+.dshz-seg button{border:0;background:transparent;color:var(--dshz-dim);padding:3px 10px;font-size:11.5px;cursor:pointer}
+.dshz-seg button.on{background:var(--dshz-accent);color:#fff}
+/* 上下文标签（@论文 chips） */
+.dshz-chips{display:flex;gap:4px;flex-wrap:wrap;padding:5px 8px 0}
+.dshz-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid #3d5a7d;background:#22303f;color:#a8c8f0;border-radius:20px;padding:2px 8px;font-size:11px;cursor:pointer;user-select:none}
+.dshz-chip:hover{border-color:var(--dshz-accent)}
+.dshz-chip .mode{font-size:9px;color:#7f9cc9;border-left:1px solid #3d5a7d;padding-left:5px}
+.dshz-chip .x{border:0;background:transparent;color:#7f9cc9;cursor:pointer;padding:0 0 0 2px;font-size:11px}
+.dshz-chip .x:hover{color:#ff9c9c}
+/* 输入区 */
+.dshz-inputrow{display:flex;gap:6px;padding:6px 8px;border-top:1px solid var(--dshz-line)}
+.dshz-inputwrap{position:relative;flex:1;min-width:0}
+.dshz-pop{position:absolute;left:0;right:0;top:calc(100% + 4px);background:#20242b;border:1px solid var(--dshz-line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);max-height:220px;overflow:auto;z-index:20}
+.dshz-pop .pop-item{padding:6px 8px;font-size:11.5px;color:var(--dshz-fg);cursor:pointer;border-bottom:1px solid #262a30;line-height:1.3}
+.dshz-pop .pop-item:hover{background:#2b3444}
+.dshz-pop .pop-item .m{color:var(--dshz-dim);font-size:10px}
+/* 模型行 */
+.dshz-model-row{display:flex;gap:6px;align-items:center;padding:5px 8px;border-top:1px solid var(--dshz-line);background:#202329}
+.dshz-model-row label{font-size:10.5px;color:var(--dshz-dim);flex:none}
+.dshz-model-row select{flex:1;background:#1e2126;border:1px solid var(--dshz-line);border-radius:6px;color:var(--dshz-fg);padding:3px 6px;font-size:11px}
+/* 欢迎首屏 */
+.dshz-welcome{padding:22px 18px;text-align:center}
+.dshz-welcome h2{font-size:16px;color:var(--dshz-fg);margin:0 0 6px}
+.dshz-welcome p{font-size:11.5px;color:var(--dshz-dim);line-height:1.7;margin:4px 0}
 .dshz-chat-msgs{flex:1;min-height:0;overflow:auto;padding:8px}
 .dshz-msg{margin:4px 0}
 .dshz-msg .who{font-size:10px;color:var(--dshz-dim);margin-bottom:2px}

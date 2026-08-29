@@ -89,6 +89,7 @@ export function apply(ctx: HostContext, config: ZoteroConfig): void {
             agentDefaultModel,
             agents: ctx.get('agents'),
             sessionPersistence: ctx.get('sessionPersistence'),
+            sessionController: ctx.get('sessionController'),
           })(req as never, res as never),
       })
       log(`route registered ${API_PREFIX}`)

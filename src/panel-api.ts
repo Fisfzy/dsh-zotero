@@ -316,11 +316,11 @@ export async function openLibraryChatSession(
   return { ok: true, sessionId, chars }
 }
 
-/** 向文献会话发送一条消息（冷会话自动恢复）。 */
+/** 向文献会话发送一条消息（冷会话自动恢复；@papers 逐个注入元数据/全文）。 */
 export async function sendChatMessage(
   deps: PanelApiDeps,
   body: Record<string, unknown>,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; chars?: number; error?: string }> {
   const agents = agentsOf(deps)
   if (!agents) return { ok: false, error: 'agents 服务不可用' }
   const sessionId = String(body.sessionId ?? '')
@@ -333,11 +333,76 @@ export async function sendChatMessage(
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
   try {
+    // @论文 引用：发送前逐个注入（pdf=全文精读模式 qa；meta=元数据+摘要）。
+    const papers = Array.isArray(body.papers) ? (body.papers as Array<Record<string, unknown>>) : []
+    let chars = 0
+    for (const p of papers.slice(0, 4)) {
+      const itemKey = String(p?.itemKey ?? '')
+      if (!itemKey) continue
+      const mode = p.mode === 'pdf' ? 'qa' : 'meta'
+      const built = await buildPaperContext(deps, { ...body, itemKey, mode })
+      if (built.ok) {
+        injectText(agent, built.text)
+        chars += built.chars
+      }
+    }
     followupText(agent, text)
+    return { ok: true, chars }
+  } catch (err: unknown) {
+    return { ok: false, error: String((err as Error)?.message ?? err) }
+  }
+}
+
+/** 文献会话模型选择（sessionController.selectModel；跟随 GUI 语义）。 */
+export async function selectChatModel(
+  deps: PanelApiDeps,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; error?: string }> {
+  const sc = deps.sessionController as
+    | { selectModel?(req: Record<string, unknown>): Promise<{ selected: unknown }> }
+    | undefined
+  if (!sc?.selectModel) return { ok: false, error: '模型切换服务不可用（sessionController）' }
+  try {
+    await sc.selectModel({
+      sessionId: String(body.sessionId ?? ''),
+      provider: String(body.provider ?? ''),
+      model: String(body.model ?? ''),
+      ...(body.reasoningEffort ? { reasoningEffort: String(body.reasoningEffort) } : {}),
+    })
     return { ok: true }
   } catch (err: unknown) {
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
+}
+
+/** 可用模型目录（provider → models）+ 当前选择。 */
+export async function chatModels(deps: PanelApiDeps): Promise<{
+  providers: Array<{ id: string; name: string; models: Array<{ id: string; name: string; description?: string }> }>
+  current: { provider: string; model: string; reasoningEffort?: string } | null
+}> {
+  const providers: Array<{ id: string; name: string; models: Array<{ id: string; name: string; description?: string }> }> = []
+  try {
+    const llm = deps.llm as unknown as {
+      listProviders?(): Array<{ id: string; name: string }>
+      listModels?(provider: string): Promise<Array<{ id: string; name: string; description?: string }>>
+    }
+    for (const p of llm?.listProviders?.() ?? []) {
+      let models: Array<{ id: string; name: string; description?: string }> = []
+      try {
+        const got = await llm.listModels?.(p.id)
+        models = (got ?? []).map((m) => ({ id: m.id, name: m.name, ...(m.description ? { description: m.description } : {}) }))
+      } catch { /* provider 不可用则跳过模型 */ }
+      providers.push({ id: p.id, name: p.name, models })
+    }
+  } catch { /* 目录失败返回空 */ }
+  let current: { provider: string; model: string; reasoningEffort?: string } | null = null
+  try {
+    const sel = deps.agentDefaultModel?.currentSelection()
+    if (sel?.provider && sel?.model) {
+      current = { provider: sel.provider, model: sel.model, ...(sel.reasoningEffort ? { reasoningEffort: sel.reasoningEffort } : {}) }
+    }
+  } catch { /* ignore */ }
+  return { providers, current }
 }
 
 export interface PanelApiDeps {
@@ -348,6 +413,8 @@ export interface PanelApiDeps {
   agents: unknown
   /** Host session persistence (optional) — 冷会话 cwd 解析（chat-open）。 */
   sessionPersistence?: unknown
+  /** Host session controller (optional) — 文献会话模型选择（chat-select-model）。 */
+  sessionController?: unknown
 }
 
 export interface PanelRouteHandler {
@@ -393,6 +460,18 @@ async function handle(
       if (path === '/chat-sessions') {
         const store = readChatStore()
         return send(res, 200, { papers: store.papers, library: store.library ?? null })
+      }
+      if (path === '/chat-models') return send(res, 200, await chatModels(deps))
+      if (path === '/paper-picker') {
+        const q = query.get('q') ?? ''
+        try {
+          const r = await client.scoped().search({ query: q, limit: 8, qmode: 'titleCreatorYear' })
+          return send(res, 200, {
+            items: r.items.map((i) => ({ key: i.key, title: i.title, year: i.year, itemType: i.itemType })),
+          })
+        } catch (err: any) {
+          return send(res, 200, { items: [], error: String(err?.message ?? err) })
+        }
       }
       if (path === '/chat-messages' && query.get('sessionId')) {
         return send(res, 200, { messages: chatMessages(query.get('sessionId')!) })
@@ -440,6 +519,20 @@ async function handle(
       if (path === '/chat-open') return send(res, 200, await openPaperChatSession(deps, body))
       if (path === '/chat-open-library') return send(res, 200, await openLibraryChatSession(deps, body))
       if (path === '/chat-send') return send(res, 200, await sendChatMessage(deps, body))
+      if (path === '/chat-select-model') return send(res, 200, await selectChatModel(deps, body))
+      if (path === '/chat-history-delete') {
+        const kind = String(body.kind ?? 'paper')
+        const itemKey = String(body.itemKey ?? '')
+        const store = readChatStore()
+        let next = store
+        if (kind === 'library') {
+          next = { papers: store.papers }
+        } else if (itemKey) {
+          next = { papers: store.papers.filter((p) => p.itemKey !== itemKey), ...(store.library ? { library: store.library } : {}) }
+        }
+        writeChatStore(next)
+        return send(res, 200, { ok: true, papers: next.papers, library: next.library ?? null })
+      }
       if (path === '/config') {
         writeOverlay(body as Partial<ZoteroConfig>)
         const next = composeConfig()
