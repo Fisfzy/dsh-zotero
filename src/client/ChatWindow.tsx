@@ -13,15 +13,16 @@ import { CSS } from './theme'
 const API = '/@dsh-external/dsh-zotero/api'
 const OPEN_EVENT = 'dshz:chat-open'
 
-async function apiGet(path: string): Promise<any> {
-  return (await fetch(`${API}${path}`)).json()
+async function apiGet(path: string, timeoutMs = 30000): Promise<any> {
+  return (await fetch(`${API}${path}`, { signal: AbortSignal.timeout(timeoutMs) })).json()
 }
 
-async function apiPost(path: string, body: unknown): Promise<any> {
+async function apiPost(path: string, body: unknown, timeoutMs = 30000): Promise<any> {
   const res = await fetch(`${API}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   return res.json()
 }
@@ -157,8 +158,9 @@ export function ChatWindow(): JSX.Element {
     return () => clearInterval(t)
   }, [activeSid])
 
-  /* ── 模型目录（一次） ── */
-  useEffect(() => {
+  /* ── 模型目录：失败自动重试（最多 3 次，间隔 2s×n）；浮窗打开时若仍空再拉一次 ── */
+  const modelRetry = useRef(0)
+  const loadModels = (): void => {
     void apiGet('/chat-models').then((r) => {
       const opts: ModelOption[] = []
       for (const p of r.providers ?? []) {
@@ -169,8 +171,22 @@ export function ChatWindow(): JSX.Element {
       setModels(opts)
       const cur = r.current
       if (cur?.provider && cur?.model) setCurrentModel(`${cur.provider} / ${cur.model}`)
-    }).catch(() => {})
+      modelRetry.current = 0
+    }).catch(() => {
+      if (modelRetry.current < 3) {
+        modelRetry.current += 1
+        setTimeout(loadModels, 2000 * modelRetry.current)
+      }
+    })
+  }
+  useEffect(() => {
+    loadModels()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  useEffect(() => {
+    if (!hidden && models.length === 0 && currentModel === '') loadModels()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hidden])
 
   /* 新消息 → 自动滚底（仅当用户接近底部）。 */
   useEffect(() => {
@@ -184,7 +200,7 @@ export function ChatWindow(): JSX.Element {
     setBooting(true)
     setNote('')
     try {
-      const r = await apiPost('/chat-open', { itemKey, title, parent, cwd, sendRead })
+      const r = await apiPost('/chat-open', { itemKey, title, parent, cwd, sendRead }, 180000)
       setBooting(false)
       if (!r.ok) { setNote(`⚠️ ${r.error ?? '打开失败'}`); return }
       setActive({ kind: 'paper', itemKey, title: title || itemKey, sessionId: r.sessionId })
@@ -201,7 +217,7 @@ export function ChatWindow(): JSX.Element {
     setBooting(true)
     setNote('')
     try {
-      const r = await apiPost('/chat-open-library', { parent, cwd })
+      const r = await apiPost('/chat-open-library', { parent, cwd }, 60000)
       setBooting(false)
       if (!r.ok) { setNote(`⚠️ ${r.error ?? '打开失败'}`); return }
       setActive({ kind: 'library', title: '文献库对话', sessionId: r.sessionId })
@@ -484,8 +500,12 @@ export function ChatWindow(): JSX.Element {
               value={currentModel}
               disabled={!active || models.length === 0 || modelBusy}
               onChange={(e) => void onModelChange(e.target.value)}
+              title={models.length === 0 ? '模型目录加载中…（会自动重试）' : undefined}
             >
-              {models.length === 0 ? <option value="">加载中…</option> : null}
+              {models.length === 0 && currentModel ? (
+                <option value={currentModel}>{currentModel.split(' / ').pop()}</option>
+              ) : null}
+              {models.length === 0 && !currentModel ? <option value="">加载中…</option> : null}
               {models.map((m) => (
                 <option key={`${m.provider}/${m.model}`} value={`${m.provider} / ${m.model}`}>
                   {m.name}{m.provider !== 'deepseek' ? ` (${m.provider})` : ''}

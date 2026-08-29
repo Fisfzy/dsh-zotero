@@ -380,21 +380,6 @@ export async function chatModels(deps: PanelApiDeps): Promise<{
   providers: Array<{ id: string; name: string; models: Array<{ id: string; name: string; description?: string }> }>
   current: { provider: string; model: string; reasoningEffort?: string } | null
 }> {
-  const providers: Array<{ id: string; name: string; models: Array<{ id: string; name: string; description?: string }> }> = []
-  try {
-    const llm = deps.llm as unknown as {
-      listProviders?(): Array<{ id: string; name: string }>
-      listModels?(provider: string): Promise<Array<{ id: string; name: string; description?: string }>>
-    }
-    for (const p of llm?.listProviders?.() ?? []) {
-      let models: Array<{ id: string; name: string; description?: string }> = []
-      try {
-        const got = await llm.listModels?.(p.id)
-        models = (got ?? []).map((m) => ({ id: m.id, name: m.name, ...(m.description ? { description: m.description } : {}) }))
-      } catch { /* provider 不可用则跳过模型 */ }
-      providers.push({ id: p.id, name: p.name, models })
-    }
-  } catch { /* 目录失败返回空 */ }
   let current: { provider: string; model: string; reasoningEffort?: string } | null = null
   try {
     const sel = deps.agentDefaultModel?.currentSelection()
@@ -402,6 +387,28 @@ export async function chatModels(deps: PanelApiDeps): Promise<{
       current = { provider: sel.provider, model: sel.model, ...(sel.reasoningEffort ? { reasoningEffort: sel.reasoningEffort } : {}) }
     }
   } catch { /* ignore */ }
+  const providers: Array<{ id: string; name: string; models: Array<{ id: string; name: string; description?: string }> }> = []
+  try {
+    const llm = deps.llm as unknown as {
+      listProviders?(): Array<{ id: string; name: string }>
+      listModels?(provider: string): Promise<Array<{ id: string; name: string; description?: string }>>
+    }
+    const list = llm?.listProviders?.() ?? []
+    // 并发 + 每 provider 5s 超时：单个 provider 挂起不再拖垮整个下拉。
+    const withTimeout = <T>(p: Promise<T>): Promise<T | null> =>
+      Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), 5000))])
+    const settled = await Promise.allSettled(list.map(async (p) => {
+      let models: Array<{ id: string; name: string; description?: string }> = []
+      try {
+        const got = await withTimeout(llm.listModels?.(p.id) ?? Promise.resolve([]))
+        models = (got ?? []).map((m) => ({ id: m.id, name: m.name, ...(m.description ? { description: m.description } : {}) }))
+      } catch { /* provider 不可用则跳过模型 */ }
+      return { id: p.id, name: p.name, models }
+    }))
+    for (const s of settled) {
+      if (s.status === 'fulfilled') providers.push(s.value)
+    }
+  } catch { /* 目录失败返回空 */ }
   return { providers, current }
 }
 
