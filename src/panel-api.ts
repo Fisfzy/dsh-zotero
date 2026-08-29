@@ -33,10 +33,10 @@ export const PLUGIN_ID = '@dsh-external/dsh-zotero'
 export const API_PREFIX = '/@dsh-external/dsh-zotero/api'
 
 const READ_PROMPT =
-  '「Zotero 开读」——请以精读模式阅读上面注入的论文：先一句话概述核心贡献，再按章节提炼要点（方法/关键结果/局限），最后给 3 个可深入追问的问题。信息不足时调用 zotero_read_pdf / zotero_summarize 补充阅读。'
+  '「Zotero 开读」——请以精读模式阅读上面注入的论文：先一句话概述核心贡献，再按章节提炼要点（方法/关键结果/局限），最后给 3 个可深入追问的问题。信息不足时用 zotero_read_fulltext 分段读取缓存全文（先免参拿 sections 章节偏移，再按 offset 精读各章），或用 zotero_summarize 补定向总结。'
 
 const LIBRARY_MODE_PROMPT =
-  '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_read_pdf / zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字）。一次不要读取超过 2 篇全文，保持回答有据可查。'
+  '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_read_fulltext（读取缓存全文——先免参调用拿 sections 章节偏移，再按 offset/limit 分段精读）或 zotero_read_pdf（预览）/ zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字）。一次不要读取超过 2 篇全文，保持回答有据可查。'
 
 const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey'])
 
@@ -816,7 +816,7 @@ async function buildPaperContext(deps: PanelApiDeps, body: Record<string, unknow
   if (it.doi) lines.push(`- DOI: ${it.doi}`)
   if (it.url) lines.push(`- URL: ${it.url}`)
   lines.push(`- 标签: ${it.tags.join(', ') || '(无)'}`)
-  lines.push(`- Zotero key: ${it.key}（可调用 zotero_get_item / zotero_read_pdf 获取附件全文）`)
+  lines.push(`- Zotero key: ${it.key}（可调用 zotero_get_item / zotero_read_fulltext 读取全文——先免参调用拿 sections 章节偏移，再按 offset/limit 精读各章；zotero_read_pdf 仅预览）`)
   if (it.abstractNote) lines.push(`- 摘要: ${it.abstractNote.slice(0, 1200)}`)
   const mode = String(body.mode ?? 'meta')
   if (mode === 'qa') {

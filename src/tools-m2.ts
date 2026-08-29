@@ -185,6 +185,16 @@ function textOf(md: string, s: Section): string {
   return md.split('\n').slice(s.start, s.end).join('\n')
 }
 
+/** 行号 → 字符偏移（含换行符）。 */
+function charOffsetOf(md: string, lineIndex: number): number {
+  if (lineIndex <= 0) return 0
+  const lines = md.split('\n')
+  let off = 0
+  const n = Math.min(lineIndex, lines.length - 1)
+  for (let i = 0; i < n; i += 1) off += lines[i].length + 1
+  return off
+}
+
 /** Head window plus (when query given) top matching sections, honoring a char budget. */
 function buildWindow(md: string, query: string | undefined, charBudget: number): { text: string; sections: string[] } {
   const budget = Math.max(charBudget, 4000)
@@ -294,7 +304,110 @@ export function registerM2Tools(
     }),
   )
 
-  /* ── zotero_summarize ─────────────────────────────────────────────── */
+  /* ── zotero_read_fulltext：按区间读取全文 MD（章节定位/关键词定位） ── */
+  ctx.tools.register(
+    defineTool({
+      name: 'zotero_read_fulltext',
+      description:
+        'Read an arbitrary window of a paper\'s full-text markdown (MinerU/pdftotext disk cache) — ACTUAL text, unlike zotero_read_pdf (preview only). Call once with just itemKey to get `sections` (chapter titles + char offsets), then read any paragraph via offset/limit (8k chars per call, up to 20k). Optional `query` returns match windows. Use for deep reading by sections.',
+      parameters: {
+        itemKey: { type: 'string', required: true, description: 'Zotero item key (paper).' },
+        attachmentKey: { type: 'string', description: 'Specific PDF attachment key; default = first PDF attachment.' },
+        offset: { type: 'number', description: 'Char offset into the markdown (default 0).' },
+        limit: { type: 'number', description: 'Chars to return (default 8000, max 20000).' },
+        query: { type: 'string', description: 'Optional keyword/heading; returns up to 3 match windows (±4000 chars each).' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', required: true },
+            itemKey: { type: 'string', required: true },
+            title: { type: 'string', required: true },
+            source: { type: 'string', required: true },
+            textChars: { type: 'integer', required: true },
+            sections: {
+              type: 'array', required: true,
+              items: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  title: { type: 'string', required: true },
+                  offset: { type: 'integer', required: true },
+                  charLen: { type: 'integer', required: true },
+                },
+              },
+            },
+            offset: { type: 'integer', required: true },
+            text: { type: 'string', required: true },
+            cacheDir: { type: 'string', required: true },
+            error: { type: 'string', required: true },
+            hint: { type: 'string', required: true },
+          },
+        },
+        render: renderJson,
+      },
+      timeoutMs: 300_000,
+      execute: async (args, exec) => {
+        const a = args as { itemKey: string; attachmentKey?: string; offset?: number; limit?: number; query?: string }
+        try {
+          const parsed = await ensureParsed(client, cfg, 'auto', a.itemKey, a.attachmentKey, exec)
+          const sections = splitSections(parsed.md).slice(0, 30).map((s) => {
+            const off = charOffsetOf(parsed.md, s.start)
+            const endOff = charOffsetOf(parsed.md, s.end)
+            return { title: s.title, offset: off, charLen: Math.max(0, endOff - off) }
+          })
+          const limit = Math.min(Math.max(Number(a.limit ?? 8000), 500), 20000)
+          let text = ''
+          let offset = Math.max(0, Math.floor(Number(a.offset ?? 0)))
+          if (a.query && a.query.trim()) {
+            const q = a.query.trim().toLowerCase()
+            const hay = parsed.md.toLowerCase()
+            const hits: number[] = []
+            let at = hay.indexOf(q)
+            while (at >= 0 && hits.length < 3) {
+              hits.push(at)
+              at = hay.indexOf(q, at + q.length)
+            }
+            if (hits.length) {
+              offset = Math.max(0, hits[0] - 4000)
+              let out = ''
+              for (const h of hits) {
+                out += '\n\n···\n' + parsed.md.slice(Math.max(0, h - 3000), Math.min(parsed.md.length, h + q.length + 3000))
+              }
+              text = out.slice(0, limit)
+            }
+          }
+          if (!text) {
+            text = parsed.md.slice(offset, offset + limit)
+          }
+          return {
+            status: 'ok',
+            itemKey: a.itemKey,
+            title: parsed.title,
+            source: parsed.source,
+            textChars: parsed.textChars,
+            sections,
+            offset,
+            text,
+            cacheDir: parsed.cacheDir,
+            error: '',
+            hint: '',
+          }
+        } catch (err: any) {
+          const d = { ...domainError(err), status: 'error' as const, itemKey: a.itemKey, title: '', source: '', textChars: 0, sections: [] as Array<{ title: string; offset: number; charLen: number }>, offset: 0, text: '', cacheDir: '', error: String(err?.message ?? err), hint: '' }
+          return d
+        }
+      },
+      isConcurrencySafe: () => false,
+      presentCall: (args) => ({
+        card: 'generic',
+        title: `读全文: ${String((args as { itemKey?: unknown }).itemKey ?? '')}`,
+        kind: 'other',
+        rawInput: args,
+      }),
+    }),
+  )
   ctx.tools.register(
     defineTool({
       name: 'zotero_summarize',
