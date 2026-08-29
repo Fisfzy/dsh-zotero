@@ -83,6 +83,12 @@ export const CSS = `
 .dshz-welcome h2{font-size:16px;color:var(--dshz-fg);margin:0 0 6px}
 .dshz-welcome p{font-size:11.5px;color:var(--dshz-dim);line-height:1.7;margin:4px 0}
 .dshz-chat-msgs{flex:1;min-height:0;overflow:auto;padding:8px}
+/* CoT 思考折叠块 */
+.dshz-cot{background:#1d2024;border:1px solid #2a2e35;border-radius:8px;margin:2px 0 4px;font-size:11px;color:#9aa2ad}
+.dshz-cot summary{cursor:pointer;padding:3px 8px;color:#77808d;user-select:none;list-style:none;display:flex;align-items:center;gap:4px}
+.dshz-cot summary::before{content:"▸";font-size:10px}
+.dshz-cot[open] summary::before{content:"▾"}
+.dshz-cot-body{padding:4px 8px 6px;white-space:pre-wrap;word-break:break-word;color:#8a919c;line-height:1.55;max-height:220px;overflow:auto;border-top:1px solid #2a2e35}
 .dshz-msg{margin:4px 0}
 .dshz-msg .who{font-size:10px;color:var(--dshz-dim);margin-bottom:2px}
 .dshz-msg .bubble{white-space:pre-wrap;word-break:break-word;background:#22262c;border:1px solid var(--dshz-line);border-radius:8px;padding:5px 8px;font-size:12.5px}

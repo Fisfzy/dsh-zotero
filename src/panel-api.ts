@@ -40,29 +40,24 @@ const LIBRARY_MODE_PROMPT =
 
 const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey'])
 
-/* ── 文献聊天（M3.2 rev2）：每篇论文一个会话 + History 列表 ────────────
- * 会话 id 确定性（zotero-paper-<itemKey> / zotero-library），映射持久化
- * 在 chat-sessions.json；消息缓存仍由 host session/event 订阅累积。
- * 参考同环境已装配的 dsh-better-sidebar（ctx.get('agents') + create/resume）。
+/* ── 文献聊天（M3.2 rev4）：每篇论文支持多个对话实例 + History 分组 ───
+ * conversations[] 平铺：paper 实例 sessionId = zotero-paper-<key>[-<seq>]，
+ * seq 从 1 递增；library 单实例（通用）zotero-library。
+ * 消息缓存仍由 host session/event 订阅累积；参考 dsh-better-sidebar。
  */
 
-interface ChatPaperEntry {
-  itemKey: string
+interface ChatConv {
+  kind: 'paper' | 'library'
+  itemKey?: string
   title: string
   sessionId: string
-  injectedAt: number
-  at: number
-}
-
-interface ChatLibraryEntry {
-  sessionId: string
+  seq: number
   injectedAt: number
   at: number
 }
 
 interface ChatSessionStore {
-  papers: ChatPaperEntry[]
-  library?: ChatLibraryEntry
+  conversations: ChatConv[]
 }
 
 const LIBRARY_SESSION_ID = 'zotero-library'
@@ -71,19 +66,51 @@ function chatStorePath(): string {
   return join(resolveCacheDir(currentConfig()), 'chat-sessions.json')
 }
 
+/** 读 + 旧格式迁移（papers[]/library → conversations[]）。 */
 function readChatStore(): ChatSessionStore {
   try {
     const p = chatStorePath()
-    if (!existsSync(p)) return { papers: [] }
-    const raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<ChatSessionStore>
-    return {
-      papers: Array.isArray(raw.papers)
-        ? raw.papers.filter((x): x is ChatPaperEntry => Boolean(x && typeof x.sessionId === 'string' && typeof x.itemKey === 'string'))
-        : [],
-      ...(raw.library && typeof raw.library.sessionId === 'string' ? { library: raw.library } : {}),
+    if (!existsSync(p)) return { conversations: [] }
+    const raw = JSON.parse(readFileSync(p, 'utf8')) as any
+    if (Array.isArray(raw.conversations)) {
+      return {
+        conversations: raw.conversations.filter((x: any): x is ChatConv =>
+          Boolean(x && typeof x.sessionId === 'string' && (x.kind === 'paper' || x.kind === 'library'))),
+      }
     }
+    // 旧格式迁移
+    const convs: ChatConv[] = []
+    if (Array.isArray(raw.papers)) {
+      for (const pp of raw.papers) {
+        if (pp && typeof pp.sessionId === 'string' && typeof pp.itemKey === 'string') {
+          convs.push({
+            kind: 'paper',
+            itemKey: pp.itemKey,
+            title: pp.title ?? pp.itemKey,
+            sessionId: pp.sessionId,
+            seq: 1,
+            injectedAt: np(pp.injectedAt),
+            at: np(pp.at),
+          })
+        }
+      }
+    }
+    if (raw.library && typeof raw.library.sessionId === 'string') {
+      convs.push({
+        kind: 'library',
+        title: '文献库对话',
+        sessionId: raw.library.sessionId,
+        seq: 0,
+        injectedAt: np(raw.library.injectedAt),
+        at: np(raw.library.at),
+      })
+    }
+    return { conversations: convs }
   } catch {
-    return { papers: [] }
+    return { conversations: [] }
+  }
+  function np(v: unknown): number {
+    return typeof v === 'number' && Number.isFinite(v) ? v : Date.now()
   }
 }
 
@@ -94,10 +121,21 @@ function writeChatStore(store: ChatSessionStore): void {
   } catch { /* best-effort */ }
 }
 
+/** 某论文已有实例的最大 seq（0 = 尚无）。 */
+function maxPaperSeq(store: ChatSessionStore, itemKey: string): number {
+  let max = 0
+  for (const c of store.conversations) {
+    if (c.kind === 'paper' && c.itemKey === itemKey && c.seq > max) max = c.seq
+  }
+  return max
+}
+
 /** 文献会话消息缓存（host session/event 订阅写入；面板轮询读取）。 */
 export interface ChatLogMsg {
   kind: 'user' | 'assistant' | 'tool'
   text: string
+  /** 思考过程（reasoning），浮窗折叠显示。 */
+  reasoning?: string
   name?: string
   running?: boolean
   ok?: boolean
@@ -108,15 +146,18 @@ const chatLogs = new Map<string, ChatLogMsg[]>()
 export function pushChatLog(sessionId: string, msg: ChatLogMsg): void {
   const list = chatLogs.get(sessionId) ?? []
   const last = list[list.length - 1]
-  // assistant 流式累积：chunk 追加到 running 尾部；完整 message 替换该 running 条。
+  // assistant 流式累积：chunk 追加到 running 尾部（text/reasoning 分离）；
+  // 完整 message 替换该 running 条（保留流式 reasoning 累积）。
   if (msg.kind === 'assistant' && msg.running && last?.kind === 'assistant' && last.running) {
-    last.text += msg.text
+    if (msg.text) last.text += msg.text
+    if (msg.reasoning) last.reasoning = (last.reasoning ?? '') + msg.reasoning
     last.at = msg.at
     chatLogs.set(sessionId, list)
     return
   }
   if (msg.kind === 'assistant' && !msg.running && msg.text && last?.kind === 'assistant' && last.running) {
     last.text = msg.text
+    if (msg.reasoning) last.reasoning = msg.reasoning
     last.running = false
     last.at = msg.at
     chatLogs.set(sessionId, list)
@@ -279,21 +320,39 @@ async function parentCwdOf(deps: PanelApiDeps, body: Record<string, unknown>): P
   return undefined
 }
 
-/** 打开（或复用）某论文的文献会话：注入全文（首次/force），可选送精读指令。 */
+/** 打开（或新建）某论文的一个对话实例：seq 指定则复用该实例，否则新建（seq=max+1）。
+ * 新实例总是注入全文（各实例上下文独立）；sendRead 追加精读指令。 */
 export async function openPaperChatSession(
   deps: PanelApiDeps,
   body: Record<string, unknown>,
-): Promise<{ ok: boolean; sessionId?: string; chars?: number; error?: string; cwd?: string }> {
+): Promise<{ ok: boolean; sessionId?: string; seq?: number; chars?: number; error?: string; cwd?: string; isNew?: boolean }> {
   const agents = agentsOf(deps)
   if (!agents?.create && !agents?.resume) return { ok: false, error: 'agents 服务不可用' }
   const itemKey = String(body.itemKey ?? '')
   if (!itemKey) return { ok: false, error: '需要 itemKey' }
   const title = String(body.title ?? '') || itemKey
-  const store = readChatStore()
-  const entry = store.papers.find((p) => p.itemKey === itemKey)
-  const sessionId = entry?.sessionId ?? `zotero-paper-${itemKey}`
   const cwd = String(body.cwd ?? '') || (await parentCwdOf(deps, body))
-  console.log(`[dsh-zotero] chat-open itemKey=${itemKey} parent=${String(body.parent ?? '')} cwd=${JSON.stringify(cwd)} via=${body.cwd ? 'body' : 'parent'}`)
+  const store = readChatStore()
+  let conv: ChatConv | undefined
+  const reqSeq = Number(body.seq ?? 0)
+  if (reqSeq > 0) {
+    conv = store.conversations.find((c) => c.kind === 'paper' && c.itemKey === itemKey && c.seq === reqSeq)
+  }
+  const isNew = !conv
+  if (!conv) {
+    const seq = maxPaperSeq(store, itemKey) + 1
+    conv = {
+      kind: 'paper',
+      itemKey,
+      title,
+      sessionId: seq === 1 ? `zotero-paper-${itemKey}` : `zotero-paper-${itemKey}-${seq}`,
+      seq,
+      injectedAt: 0,
+      at: Date.now(),
+    }
+  }
+  const sessionId = conv.sessionId
+  console.log(`[dsh-zotero] chat-open itemKey=${itemKey} seq=${conv.seq} parent=${String(body.parent ?? '')} cwd=${JSON.stringify(cwd)}`)
 
   let agent: AgentLike
   try {
@@ -302,39 +361,30 @@ export async function openPaperChatSession(
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
 
-  const alreadyInjected = Boolean(entry && entry.injectedAt > 0)
   let chars = 0
-  if (!alreadyInjected || body.force) {
+  if (!conv.injectedAt || body.force) {
     const built = await buildPaperContext(deps, { ...body, itemKey })
     if (!built.ok) return { ok: false, sessionId, error: built.error ?? '构建论文上下文失败' }
     injectText(agent, built.text)
     chars = built.text.length
-    writeChatStore({
-      papers: [
-        ...store.papers.filter((p) => p.itemKey !== itemKey),
-        { itemKey, title, sessionId, injectedAt: Date.now(), at: Date.now() },
-      ],
-      ...(store.library ? { library: store.library } : {}),
-    })
+    conv.injectedAt = Date.now()
   }
+  conv.at = Date.now()
+  if (body.title) conv.title = String(body.title)
+  writeChatStore({
+    conversations: [
+      ...store.conversations.filter((c) => !(c.kind === 'paper' && c.itemKey === itemKey && c.seq === conv.seq)),
+      conv,
+    ],
+  })
   if (body.sendRead) {
     const via = await deliverChatMessage(deps, sessionId, READ_PROMPT)
     console.log(`[dsh-zotero] sendRead via=${via}`)
   }
-  // History 标题跟随最新打开时的标题（已存在会话也更新）。
-  if (entry && body.title && body.title !== entry.title) {
-    writeChatStore({
-      papers: [
-        ...store.papers.filter((p) => p.itemKey !== itemKey),
-        { ...entry, title: String(body.title), at: Date.now() },
-      ],
-      ...(store.library ? { library: store.library } : {}),
-    })
-  }
-  return { ok: true, sessionId, chars, cwd: cwd ?? '' }
+  return { ok: true, sessionId, seq: conv.seq, chars, cwd: cwd ?? '', isNew }
 }
 
-/** 打开（或复用）「文献库对话」会话：注入库级引导（仅首次）。 */
+/** 打开（或复用）「文献库对话」会话（单实例，全库通用）：注入库级引导（仅首次）。 */
 export async function openLibraryChatSession(
   deps: PanelApiDeps,
   body: Record<string, unknown>,
@@ -343,8 +393,8 @@ export async function openLibraryChatSession(
   if (!agents?.create && !agents?.resume) return { ok: false, error: 'agents 服务不可用' }
   const cwd = String(body.cwd ?? '') || (await parentCwdOf(deps, body))
   const store = readChatStore()
-  const entry = store.library
-  const sessionId = entry?.sessionId ?? LIBRARY_SESSION_ID
+  let conv = store.conversations.find((c) => c.kind === 'library')
+  const sessionId = conv?.sessionId ?? LIBRARY_SESSION_ID
 
   let agent: AgentLike
   try {
@@ -354,13 +404,11 @@ export async function openLibraryChatSession(
   }
 
   let chars = 0
-  if (!entry?.injectedAt || body.force) {
+  if (!conv?.injectedAt || body.force) {
     injectText(agent, `【Zotero 文献库对话模式】\n${LIBRARY_MODE_PROMPT}`)
     chars = LIBRARY_MODE_PROMPT.length
-    writeChatStore({
-      papers: store.papers,
-      library: { sessionId, injectedAt: Date.now(), at: Date.now() },
-    })
+    conv = { kind: 'library', title: '文献库对话', sessionId, seq: 0, injectedAt: Date.now(), at: Date.now() }
+    writeChatStore({ conversations: [...store.conversations.filter((c) => c.kind !== 'library'), conv] })
   }
   if (body.sendIntro) {
     await deliverChatMessage(deps, sessionId, '你好！请先简单介绍你能做什么，并给我 3 个可立即使用的示例问题。')
@@ -519,7 +567,7 @@ async function handle(
       if (path === '/config') return send(res, 200, maskConfig(currentConfig()))
       if (path === '/chat-sessions') {
         const store = readChatStore()
-        return send(res, 200, { papers: store.papers, library: store.library ?? null })
+        return send(res, 200, { conversations: store.conversations })
       }
       if (path === '/chat-models') return send(res, 200, await chatModels(deps))
       if (path === '/paper-picker') {
@@ -583,15 +631,17 @@ async function handle(
       if (path === '/chat-history-delete') {
         const kind = String(body.kind ?? 'paper')
         const itemKey = String(body.itemKey ?? '')
+        const seq = Number(body.seq ?? 0)
         const store = readChatStore()
-        let next = store
+        let next = store.conversations
         if (kind === 'library') {
-          next = { papers: store.papers }
+          next = store.conversations.filter((c) => c.kind !== 'library')
         } else if (itemKey) {
-          next = { papers: store.papers.filter((p) => p.itemKey !== itemKey), ...(store.library ? { library: store.library } : {}) }
+          next = store.conversations.filter((c) =>
+            !(c.kind === 'paper' && c.itemKey === itemKey && (seq > 0 ? c.seq === seq : true)))
         }
-        writeChatStore(next)
-        return send(res, 200, { ok: true, papers: next.papers, library: next.library ?? null })
+        writeChatStore({ conversations: next })
+        return send(res, 200, { ok: true, conversations: next })
       }
       if (path === '/config') {
         writeOverlay(body as Partial<ZoteroConfig>)

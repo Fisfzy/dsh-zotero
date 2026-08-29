@@ -118,10 +118,22 @@ export function apply(ctx: HostContext, config: ZoteroConfig): void {
         const chunk = data?.chunk
         if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
           pushChatLog(sid, { kind: 'assistant', text: chunk.text, running: true, at: Date.now() })
+        } else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text) {
+          pushChatLog(sid, { kind: 'assistant', text: '', reasoning: chunk.text, running: true, at: Date.now() })
         }
       } else if (type === 'assistant/message') {
-        const text = extractText(data?.message?.content)
-        if (text) pushChatLog(sid, { kind: 'assistant', text, running: false, at: Date.now() })
+        // content 拆分：reasoning 块 → reasoning 字段（浮窗折叠显示）；text 块 → 正文。
+        const text = extractText(data?.message?.content?.filter((b: any) => b?.type === 'text'))
+        const reasoning = extractText(data?.message?.content?.filter((b: any) => b?.type === 'reasoning'))
+        if (text || reasoning) {
+          pushChatLog(sid, {
+            kind: 'assistant',
+            text,
+            ...(reasoning ? { reasoning } : {}),
+            running: false,
+            at: Date.now(),
+          })
+        }
       } else if (type === 'tool/call') {
         const callId = String(data?.callId ?? '')
         const name = String(data?.name ?? 'tool')

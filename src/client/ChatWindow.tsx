@@ -1,11 +1,9 @@
 /**
- * dsh-zotero — 独立浮动文献聊天窗（M3.2 rev3）。
+ * dsh-zotero — 独立浮动文献聊天窗（M3.2 rev4）。
  *
- * 对照原版 llm-for-zotero 对话框补齐（用户确认范围）：
- *   A 组：顶部分段「Paper chat | 文献库对话」+ 当前论文标题、欢迎首屏、
- *         History 删除、Diagram pill
- *   B 组：@论文 引用（左键点标签=发送 PDF；右键=切换 全文/元数据 模式）、
- *         会话级模型选择器（host sessionController.selectModel）
+ * 用户决策（rev4）：文献库历史通用（单实例）；单论文对话历史各自独立
+ *   —— 每篇论文可开多个对话实例（seq 1..n），History 按论文分组；
+ *   「+ 新建对话」= 当前论文开新实例；CoT 折叠小字显示（默认收起）。
  */
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { CSS } from './theme'
@@ -30,22 +28,19 @@ async function apiPost(path: string, body: unknown, timeoutMs = 30000): Promise<
 export interface ChatMsg {
   kind: 'user' | 'assistant' | 'tool'
   text: string
+  reasoning?: string
   name?: string
   running?: boolean
   ok?: boolean
   at: number
 }
 
-interface PaperEntry {
-  itemKey: string
+interface ChatConv {
+  kind: 'paper' | 'library'
+  itemKey?: string
   title: string
   sessionId: string
-  injectedAt: number
-  at: number
-}
-
-interface LibraryEntry {
-  sessionId: string
+  seq: number
   injectedAt: number
   at: number
 }
@@ -55,6 +50,7 @@ interface ActiveSession {
   itemKey?: string
   title: string
   sessionId: string
+  seq: number
 }
 
 interface PaperChip {
@@ -96,8 +92,7 @@ export function ChatWindow(): JSX.Element {
   const [hidden, setHidden] = useState(true)
   const [booting, setBooting] = useState(false)
   const [note, setNote] = useState('')
-  const [papers, setPapers] = useState<PaperEntry[]>([])
-  const [library, setLibrary] = useState<LibraryEntry | null>(null)
+  const [convs, setConvs] = useState<ChatConv[]>([])
   const [active, setActive] = useState<ActiveSession | null>(null)
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
@@ -124,7 +119,7 @@ export function ChatWindow(): JSX.Element {
       const detail = (ev as CustomEvent).detail as { target: string; itemKey?: string; title?: string; sendRead?: boolean; parent?: string; cwd?: string }
       setHidden(false)
       if (detail.target === 'paper' && detail.itemKey) {
-        void openPaper(detail.itemKey, detail.title ?? '', detail.parent ?? '', detail.cwd ?? '', detail.sendRead ?? false)
+        void openPaper(detail.itemKey, detail.title ?? '', 0, detail.sendRead ?? false, detail.parent ?? '', detail.cwd ?? '')
       } else if (detail.target === 'library') {
         void openLibrary(detail.parent ?? '', detail.cwd ?? '')
       }
@@ -134,13 +129,10 @@ export function ChatWindow(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  /* ── History 列表轮询（5s） ── */
+  /* ── History 轮询（5s） ── */
   useEffect(() => {
     const load = (): void => {
-      void apiGet('/chat-sessions').then((r) => {
-        setPapers(r.papers ?? [])
-        setLibrary(r.library ?? null)
-      }).catch(() => {})
+      void apiGet('/chat-sessions').then((r) => setConvs(r.conversations ?? [])).catch(() => {})
     }
     load()
     const t = setInterval(load, 5000)
@@ -196,17 +188,22 @@ export function ChatWindow(): JSX.Element {
     if (near) el.scrollTop = el.scrollHeight
   }, [messages])
 
-  async function openPaper(itemKey: string, title: string, parent: string, cwd: string, sendRead: boolean): Promise<void> {
+  /** 打开/新建论文对话实例：seq=0 → 新建（max+1）；seq>0 → 复用指定实例。 */
+  async function openPaper(itemKey: string, title: string, seq: number, sendRead: boolean, parent: string, cwd: string): Promise<void> {
     setBooting(true)
     setNote('')
     try {
-      const r = await apiPost('/chat-open', { itemKey, title, parent, cwd, sendRead }, 180000)
+      const r = await apiPost('/chat-open', {
+        itemKey, title,
+        ...(seq > 0 ? { seq } : {}),
+        sendRead, parent, cwd,
+      }, 180000)
       setBooting(false)
       if (!r.ok) { setNote(`⚠️ ${r.error ?? '打开失败'}`); return }
-      setActive({ kind: 'paper', itemKey, title: title || itemKey, sessionId: r.sessionId })
+      setActive({ kind: 'paper', itemKey, title: title || itemKey, sessionId: r.sessionId, seq: r.seq ?? seq ?? 1 })
       setChips([{ itemKey, title: title || itemKey, mode: 'pdf' }])
       if (r.chars) setNote(`✅ 已载入论文上下文（${r.chars} 字符）。${sendRead ? '已发送精读指令，模型正在阅读…' : ''}`)
-      await apiGet('/chat-sessions').then((x) => { setPapers(x.papers ?? []); setLibrary(x.library ?? null) }).catch(() => {})
+      await apiGet('/chat-sessions').then((x) => setConvs(x.conversations ?? [])).catch(() => {})
     } catch (err: any) {
       setBooting(false)
       setNote(`⚠️ ${String(err?.message ?? err)}`)
@@ -220,12 +217,21 @@ export function ChatWindow(): JSX.Element {
       const r = await apiPost('/chat-open-library', { parent, cwd }, 60000)
       setBooting(false)
       if (!r.ok) { setNote(`⚠️ ${r.error ?? '打开失败'}`); return }
-      setActive({ kind: 'library', title: '文献库对话', sessionId: r.sessionId })
+      setActive({ kind: 'library', title: '文献库对话', sessionId: r.sessionId, seq: 0 })
       setChips([])
-      await apiGet('/chat-sessions').then((x) => { setPapers(x.papers ?? []); setLibrary(x.library ?? null) }).catch(() => {})
+      await apiGet('/chat-sessions').then((x) => setConvs(x.conversations ?? [])).catch(() => {})
     } catch (err: any) {
       setBooting(false)
       setNote(`⚠️ ${String(err?.message ?? err)}`)
+    }
+  }
+
+  /** 「+ 新建对话」：当前论文开新实例；无论文选中时提示。 */
+  async function newChat(): Promise<void> {
+    if (active?.kind === 'paper' && active.itemKey) {
+      await openPaper(active.itemKey, active.title, 0, false, '', '')
+    } else {
+      setNote('ℹ️ 先选中一篇论文（面板点开 或 左侧历史点击），再「+ 新建对话」在该论文下开新对话。')
     }
   }
 
@@ -287,7 +293,6 @@ export function ChatWindow(): JSX.Element {
       if (cs.some((c) => c.itemKey === item.key)) return cs
       return [...cs, { itemKey: item.key, title: item.title || item.key, mode: 'meta' }]
     })
-    // 去掉输入中的 @xxx 片段
     const idx = input.lastIndexOf('@')
     setInput(idx >= 0 ? input.slice(0, idx) : input)
     setAtOpen(false)
@@ -311,12 +316,11 @@ export function ChatWindow(): JSX.Element {
     }
   }
 
-  async function deleteHistory(kind: 'paper' | 'library', itemKey?: string): Promise<void> {
-    const r = await apiPost('/chat-history-delete', { kind, itemKey })
-    setPapers(r.papers ?? [])
-    setLibrary(r.library ?? null)
+  async function deleteConv(kind: 'paper' | 'library', itemKey?: string, seq?: number): Promise<void> {
+    const r = await apiPost('/chat-history-delete', { kind, itemKey, seq: seq ?? 0 })
+    setConvs(r.conversations ?? [])
     if (kind === 'library' && active?.kind === 'library') setActive(null)
-    if (kind === 'paper' && active?.itemKey === itemKey) {
+    if (kind === 'paper' && active?.itemKey === itemKey && active?.seq === seq) {
       setActive(null)
       setChips([])
     }
@@ -347,6 +351,20 @@ export function ChatWindow(): JSX.Element {
   const isPaper = active?.kind === 'paper'
   const paperTitle = isPaper ? (active?.title ?? '') : (active ? '文献库对话' : '')
   const welcomeTip = isPaper ? '论文对话回答关于当前活跃论文的问题，模型将在提问前预加载论文上下文。' : '文献库对话回答全库问题：模型会用 zotero_* 工具检索、深读并给出有据可查的回答。'
+  /* History 分组：library 单实例 + 按论文分组（组内按 seq 升序） */
+  const libraryConv = convs.find((c) => c.kind === 'library')
+  const paperGroups: Array<{ itemKey: string; title: string; items: ChatConv[] }> = []
+  for (const c of convs) {
+    if (c.kind !== 'paper' || !c.itemKey) continue
+    let g = paperGroups.find((x) => x.itemKey === c.itemKey)
+    if (!g) {
+      g = { itemKey: c.itemKey, title: c.title, items: [] }
+      paperGroups.push(g)
+    }
+    g.items.push(c)
+  }
+  for (const g of paperGroups) g.items.sort((a, b) => a.seq - b.seq)
+
   return (
     <div ref={winRef} className="dshz dshz-win" data-hidden={hidden ? '1' : '0'} style={{ left: 'auto', right: 16, top: 64, width: 680, height: 'min(70vh, 660px)' }}>
       <style>{CSS}</style>
@@ -365,8 +383,7 @@ export function ChatWindow(): JSX.Element {
             className={isPaper ? 'on' : ''}
             onClick={() => {
               if (active?.kind === 'paper') return
-              const p = active?.itemKey || papers[0]?.itemKey
-              if (p) void openPaper(p, active?.title ?? papers[0]?.title ?? '', '', '', false)
+              for (const g of paperGroups) { void openPaper(g.itemKey, g.title, 0, false, '', ''); return }
             }}
           >Paper chat</button>
           <button
@@ -378,35 +395,42 @@ export function ChatWindow(): JSX.Element {
       <div className="dshz-win-body">
         {/* History 侧栏 */}
         <div className="dshz-win-side">
+          <div style={{ padding: '5px 8px', borderBottom: '1px solid #262a30' }}>
+            <button className="dshz-btn" style={{ width: '100%' }} onClick={() => void newChat()}>＋ 新建对话</button>
+          </div>
           <div
             className={`side-item ${active?.kind === 'library' ? 'on' : ''}`}
             onClick={() => void openLibrary('', '')}
           >
             <span className="side-txt">📚 文献库对话</span>
-            {library ? (
-              <button className="side-del" title="从列表移除" onClick={(e) => { e.stopPropagation(); void deleteHistory('library') }}>🗑</button>
+            {libraryConv ? (
+              <button className="side-del" title="从列表移除" onClick={(e) => { e.stopPropagation(); void deleteConv('library') }}>🗑</button>
             ) : null}
           </div>
-          <div style={{ padding: '4px 8px', fontSize: 10, color: 'var(--dshz-dim)', borderBottom: '1px solid #262a30' }}>
-            论文会话（{papers.length}）
-          </div>
-          {papers.map((p) => (
-            <div
-              key={p.itemKey}
-              className={`side-item ${active?.kind === 'paper' && active.itemKey === p.itemKey ? 'on' : ''}`}
-              onClick={() => void openPaper(p.itemKey, p.title, '', '', false)}
-              title={p.title}
-            >
-              <span className="side-txt">📄 {p.title.slice(0, 22)}{p.title.length > 22 ? '…' : ''}</span>
-              <button
-                className="side-del"
-                title="从列表移除（会话数据保留）"
-                onClick={(e) => { e.stopPropagation(); void deleteHistory('paper', p.itemKey) }}
-              >🗑</button>
+          {paperGroups.map((g) => (
+            <div key={g.itemKey}>
+              <div style={{ padding: '4px 8px', fontSize: 10, color: 'var(--dshz-dim)', borderBottom: '1px solid #262a30', borderTop: '1px solid #262a30', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={g.title}>
+                📄 {g.title.slice(0, 20)}{g.title.length > 20 ? '…' : ''}（{g.items.length}）
+              </div>
+              {g.items.map((c) => (
+                <div
+                  key={c.sessionId}
+                  className={`side-item ${active?.kind === 'paper' && active.itemKey === g.itemKey && active.seq === c.seq ? 'on' : ''}`}
+                  onClick={() => void openPaper(g.itemKey, c.title, c.seq, false, '', '')}
+                  title={`${c.title} · 第${c.seq}次对话`}
+                >
+                  <span className="side-txt">💬 第{c.seq}次 · {new Date(c.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+                  <button
+                    className="side-del"
+                    title="删除此对话（会话数据保留）"
+                    onClick={(e) => { e.stopPropagation(); void deleteConv('paper', g.itemKey, c.seq) }}
+                  >🗑</button>
+                </div>
+              ))}
             </div>
           ))}
-          {papers.length === 0 ? (
-            <div style={{ padding: '6px 8px', fontSize: 10.5, color: 'var(--dshz-dim)' }}>还没有论文会话 — 在右侧「Zotero」面板点开一篇论文即可</div>
+          {paperGroups.length === 0 && !libraryConv ? (
+            <div style={{ padding: '6px 8px', fontSize: 10.5, color: 'var(--dshz-dim)' }}>还没有对话 — 在右侧「Zotero」面板点开一篇论文，或点「＋ 新建对话」</div>
           ) : null}
         </div>
         {/* 会话主区 */}
@@ -432,7 +456,7 @@ export function ChatWindow(): JSX.Element {
             </div>
           ) : null}
           <div className="dshz-chat-msgs" ref={msgsRef}>
-            {!active ? <div className="dshz-null">从左侧选择一个会话，或在面板中打开一篇论文</div> : null}
+            {!active ? <div className="dshz-null">从左侧选择一个对话，或在面板中打开一篇论文</div> : null}
             {active && messages.length === 0 ? (
               <div className="dshz-welcome">
                 <h2>Zotero 文献聊天</h2>
@@ -453,6 +477,12 @@ export function ChatWindow(): JSX.Element {
               return (
                 <div key={idx} className={`dshz-msg ${m.kind === 'user' ? 'user' : ''}`}>
                   <div className="who">{m.kind === 'user' ? '你' : '文献助手'}</div>
+                  {m.kind === 'assistant' && m.reasoning ? (
+                    <details className="dshz-cot">
+                      <summary>💭 思考过程{m.running ? ' …' : ''}</summary>
+                      <div className="dshz-cot-body">{m.reasoning}</div>
+                    </details>
+                  ) : null}
                   <div className={`bubble ${m.kind === 'assistant' && m.running ? 'run' : ''}`}>{m.text}</div>
                 </div>
               )
@@ -463,7 +493,7 @@ export function ChatWindow(): JSX.Element {
               <button key={p.label} className="dshz-btn" disabled={!active || sending} onClick={() => void send(p.text)}>{p.label}</button>
             ))}
             {isPaper ? (
-              <button className="dshz-btn" disabled={!active || sending} onClick={() => active && active.itemKey && void openPaper(active.itemKey, active.title, '', '', false)}>重新载入全文</button>
+              <button className="dshz-btn" disabled={!active || sending} onClick={() => active && active.itemKey && void openPaper(active.itemKey, active.title, 0, false, '', '')}>重新载入全文</button>
             ) : null}
           </div>
           {/* 输入行（含 @ 弹层） */}
