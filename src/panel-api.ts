@@ -384,17 +384,46 @@ export async function openPaperChatSession(
   return { ok: true, sessionId, seq: conv.seq, chars, cwd: cwd ?? '', isNew }
 }
 
-/** 打开（或复用）「文献库对话」会话（单实例，全库通用）：注入库级引导（仅首次）。 */
+/** 库会话已有实例的最大 seq（旧格式 seq=0 视为 1）。 */
+function maxLibrarySeq(store: ChatSessionStore): number {
+  let max = 0
+  for (const c of store.conversations) {
+    if (c.kind === 'library') max = Math.max(max, c.seq === 0 ? 1 : c.seq)
+  }
+  return max
+}
+
+/** 打开「文献库对话」实例：fresh=true 总是新建（seq=max+1）；否则复用最近实例；seq>0 复用指定实例。
+ * 新实例总是注入库级引导（LIBRARY_MODE_PROMPT）；sendIntro 追加开场白。 */
 export async function openLibraryChatSession(
   deps: PanelApiDeps,
   body: Record<string, unknown>,
-): Promise<{ ok: boolean; sessionId?: string; chars?: number; error?: string }> {
+): Promise<{ ok: boolean; sessionId?: string; seq?: number; chars?: number; error?: string; isNew?: boolean }> {
   const agents = agentsOf(deps)
   if (!agents?.create && !agents?.resume) return { ok: false, error: 'agents 服务不可用' }
   const cwd = String(body.cwd ?? '') || (await parentCwdOf(deps, body))
   const store = readChatStore()
-  let conv = store.conversations.find((c) => c.kind === 'library')
-  const sessionId = conv?.sessionId ?? LIBRARY_SESSION_ID
+  let conv: ChatConv | undefined
+  const reqSeq = Number(body.seq ?? 0)
+  if (reqSeq > 0) {
+    conv = store.conversations.find((c) => c.kind === 'library' && c.seq === reqSeq)
+  } else if (!body.fresh) {
+    const sorted = store.conversations.filter((c) => c.kind === 'library').sort((a, b) => b.seq - a.seq)
+    conv = sorted[0]
+  }
+  const isNew = !conv
+  if (!conv) {
+    const seq = maxLibrarySeq(store) + 1
+    conv = {
+      kind: 'library',
+      title: '文献库对话',
+      sessionId: seq === 1 ? LIBRARY_SESSION_ID : `${LIBRARY_SESSION_ID}-${seq}`,
+      seq,
+      injectedAt: 0,
+      at: Date.now(),
+    }
+  }
+  const sessionId = conv.sessionId
 
   let agent: AgentLike
   try {
@@ -404,16 +433,22 @@ export async function openLibraryChatSession(
   }
 
   let chars = 0
-  if (!conv?.injectedAt || body.force) {
+  if (!conv.injectedAt || body.force || isNew) {
     injectText(agent, `【Zotero 文献库对话模式】\n${LIBRARY_MODE_PROMPT}`)
     chars = LIBRARY_MODE_PROMPT.length
-    conv = { kind: 'library', title: '文献库对话', sessionId, seq: 0, injectedAt: Date.now(), at: Date.now() }
-    writeChatStore({ conversations: [...store.conversations.filter((c) => c.kind !== 'library'), conv] })
+    conv.injectedAt = Date.now()
   }
+  conv.at = Date.now()
+  writeChatStore({
+    conversations: [
+      ...store.conversations.filter((c) => !(c.kind === 'library' && c.seq === conv.seq)),
+      conv,
+    ],
+  })
   if (body.sendIntro) {
     await deliverChatMessage(deps, sessionId, '你好！请先简单介绍你能做什么，并给我 3 个可立即使用的示例问题。')
   }
-  return { ok: true, sessionId, chars }
+  return { ok: true, sessionId, seq: conv.seq, chars, isNew }
 }
 
 /** 向文献会话发送一条消息（冷会话自动恢复；@papers 逐个注入元数据/全文）。 */
@@ -635,7 +670,9 @@ async function handle(
         const store = readChatStore()
         let next = store.conversations
         if (kind === 'library') {
-          next = store.conversations.filter((c) => c.kind !== 'library')
+          next = seq > 0
+            ? store.conversations.filter((c) => !(c.kind === 'library' && c.seq === seq))
+            : store.conversations.filter((c) => c.kind !== 'library')
         } else if (itemKey) {
           next = store.conversations.filter((c) =>
             !(c.kind === 'paper' && c.itemKey === itemKey && (seq > 0 ? c.seq === seq : true)))
