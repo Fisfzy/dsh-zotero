@@ -43,6 +43,16 @@ export function cleanJson<T>(value: T): T {
   return value
 }
 
+/** 按声明字段裁剪（dsh-tools schema 校验 strict：未声明属性会被拒）。 */
+export function pickFields<T>(value: T, keys: readonly string[]): T {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
+  const out: Record<string, unknown> = {}
+  for (const k of keys) {
+    if (Object.hasOwn(value, k)) out[k] = (value as Record<string, unknown>)[k]
+  }
+  return out as unknown as T
+}
+
 const HINT_LOCAL_API_DISABLED =
   'Zotero 正在运行但本地 API 未开启（Zotero 9+ 默认关闭）。开启方法：Zotero → Settings（设置）→ Advanced（高级）→ 打开「Config Editor（配置编辑器）」→ 搜索 httpServer.localAPI.enabled → 双击/设为 true；部分版本直接在 Advanced 有「Enable Local API」勾选框。开启后无需重启即可使用；或不开启，改在插件设置里配置 Web API userId/apiKey 以启用降级。'
 
@@ -159,7 +169,6 @@ function toCollection(raw: RawCollection, depth: number): ZoteroCollection {
     name: raw.data?.name ?? '',
     parentKey: typeof parent === 'string' && parent !== '' ? parent : null,
     itemCount: typeof raw.meta?.numItems === 'number' ? raw.meta.numItems : undefined,
-    childKeys: Array.isArray(raw.data?.childCollections) ? raw.data.childCollections : [],
     depth,
   }
 }
@@ -171,6 +180,15 @@ interface JsonFetchResult {
   total: number
   headers: Headers
 }
+
+/** zotero_library_search / zotero_get_item 的 item 总结字段集（与工具 output schema 对齐）。 */
+const ITEM_SUMMARY_FIELDS = [
+  'key', 'version', 'itemType', 'title', 'creators', 'date', 'year', 'abstractNote',
+  'doi', 'url', 'publicationTitle', 'journalAbbreviation', 'extra', 'tags', 'collections',
+  'numChildren', 'numNotes', 'dateAdded', 'dateModified', 'library', 'source',
+] as const
+
+const CREATOR_FIELDS = ['creatorType', 'firstName', 'lastName', 'name', 'fullName'] as const
 
 export class ZoteroClient {
   private cfg: Config
@@ -522,7 +540,7 @@ export class ZoteroClient {
         src.headers,
       )
       const items = (Array.isArray(r.json) ? r.json : []).map((i: RawItem) =>
-        toSummary(i, src.source),
+        pickFields(toSummary(i, src.source), ITEM_SUMMARY_FIELDS),
       )
       return cleanJson({
         source: src.source,
@@ -620,7 +638,12 @@ export class ZoteroClient {
       return cleanJson({
         found: true,
         source: src.source,
-        item: { ...summary, attachments, notes, annotations },
+        item: {
+          ...pickFields(summary, ITEM_SUMMARY_FIELDS),
+          attachments: attachments.map((a) => pickFields(a, ['key', 'title', 'contentType', 'linkMode', 'filename', 'downloadPath', 'isPdf'] as const)),
+          notes: notes.map((n) => pickFields(n, ['key', 'note', 'title'] as const)),
+          annotations: annotations.map((an) => pickFields(an, ['key', 'annotationText', 'annotationComment', 'color', 'pageLabel'] as const)),
+        },
         error: '',
         hint: '',
       })

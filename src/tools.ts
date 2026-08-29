@@ -18,6 +18,28 @@ const renderJson = (_args: unknown, value: unknown) => [
   { type: 'text' as const, text: JSON.stringify(value, null, 2) },
 ]
 
+/** 按 output schema 递归裁剪返回值（dsh-tools 校验器 strict：未声明字段会被拒）。 */
+export function stripBySchema(value: unknown, node: any): any {
+  if (value === null || value === undefined) return value
+  if (Array.isArray(value)) {
+    return value.map((v) => stripBySchema(v, node?.items ?? {}))
+  }
+  if (typeof value === 'object') {
+    let props: Record<string, unknown> = {}
+    if (Array.isArray(node?.oneOf)) {
+      for (const o of node.oneOf) Object.assign(props, o?.properties ?? {})
+    } else {
+      props = node?.properties ?? {}
+    }
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(props)) {
+      if (Object.hasOwn(value, k)) out[k] = stripBySchema((value as Record<string, unknown>)[k], props[k])
+    }
+    return out
+  }
+  return value
+}
+
 const itemSummarySchema = {
   type: 'object',
   additionalProperties: false,
@@ -46,12 +68,23 @@ const itemSummarySchema = {
     doi: { type: 'string', required: true },
     url: { type: 'string', required: true },
     publicationTitle: { type: 'string', required: true },
+    journalAbbreviation: { type: 'string', required: true },
+    extra: { type: 'string', required: true },
     tags: { type: 'array', items: { type: 'string' }, required: true },
     collections: { type: 'array', items: { type: 'string' }, required: true },
     numChildren: { type: 'integer', required: true },
     numNotes: { type: 'integer', required: true },
     dateAdded: { type: 'string', required: true },
     dateModified: { type: 'string', required: true },
+    library: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        type: { type: 'string', required: true },
+        id: { type: 'integer', required: true },
+        name: { type: 'string' },
+      },
+    },
     source: { type: 'string', required: true },
   },
 } as const

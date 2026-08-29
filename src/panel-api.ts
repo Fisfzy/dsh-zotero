@@ -180,12 +180,26 @@ export function chatMessages(sessionId: string): ChatLogMsg[] {
   return chatLogs.get(sessionId) ?? []
 }
 
+/** turn 结束（完成/cancel/失败）：复位该会话所有 running 标记，UI 停止闪烁。 */
+export function settleRunning(sessionId: string): void {
+  const list = chatLogs.get(sessionId)
+  if (!list) return
+  let changed = false
+  for (const m of list) {
+    if (m.running) {
+      m.running = false
+      changed = true
+    }
+  }
+  if (changed) chatLogs.set(sessionId, list)
+}
+
 /* ── agents 服务结构类型（不依赖 @deepseek-ai/dsh-agent 类型） ── */
 
 interface AgentLike {
   inject(msg: unknown): void
   followup(msg: unknown): void
-  cancel?(opts?: unknown): void
+  cancel?(cause?: unknown, opts?: unknown): void
   session?: { header?: { cwd?: string }; id?: string }
 }
 
@@ -204,6 +218,34 @@ interface AgentsLike {
 
 function agentsOf(deps: PanelApiDeps): AgentsLike | undefined {
   return deps.agents as AgentsLike | undefined
+}
+
+/** 文献会话权限跟随 Full access（danger-full-access），避免 approval/sandbox 拦截工具。 */
+function grantFullAccess(deps: PanelApiDeps, agent: AgentLike): void {
+  try {
+    const svc = deps.permissionPresets as { set?(session: unknown, name: string): void } | undefined
+    const session = (agent as any)?.session
+    if (svc?.set && session) svc.set(session, 'danger-full-access')
+  } catch { /* best-effort */ }
+}
+
+/** 文献会话可用工具集：只保留 zotero_*（防模型调用 dev/ego/fs 等环境工具自我修改）。 */
+const ZOTERO_TOOL_ALLOW = [
+  'zotero_health', 'zotero_library_search', 'zotero_get_item', 'zotero_collections',
+  'zotero_read_pdf', 'zotero_read_fulltext', 'zotero_summarize', 'zotero_translate',
+]
+
+function restrictTools(agent: AgentLike): void {
+  try {
+    const tools = (agent as any)?.ctx?.get?.('tools') as
+      | { restrict?(filter: { allow: string[] }): () => void }
+      | undefined
+    console.log(`[dsh-zotero] restrictTools: tools=${Boolean(tools)} restrict=${Boolean(tools?.restrict)} sid=${String((agent as any)?.id ?? '')}`)
+    const dispose = tools?.restrict?.({ allow: ZOTERO_TOOL_ALLOW })
+    console.log(`[dsh-zotero] restrictTools applied=${Boolean(dispose)}`)
+  } catch (err: unknown) {
+    console.log(`[dsh-zotero] restrictTools failed: ${String((err as Error)?.message ?? err)}`)
+  }
 }
 
 /**
@@ -229,7 +271,7 @@ async function ensureLiveAgent(
   }
   const live = agents?.get(sessionId)
   console.log(`[dsh-zotero] ensureLive ${sessionId} after-controller live=${live ? String((live as any).status ?? '?') : 'none'}`)
-  if (live) return live
+  if (live) { grantFullAccess(deps, live); restrictTools(live); return live }
   if (!agents) throw new Error('agents 服务不可用')
   if (agents.create) {
     try {
@@ -239,6 +281,8 @@ async function ensureLiveAgent(
         signal: AbortSignal.timeout(20000),
       })
       console.log(`[dsh-zotero] ensureLive ${sessionId} created status=${String((handle.agent as any).status ?? '?')}`)
+      grantFullAccess(deps, handle.agent)
+      restrictTools(handle.agent)
       return handle.agent
     } catch (err: unknown) {
       console.log(`[dsh-zotero] ensureLive ${sessionId} create failed: ${String((err as Error)?.message ?? err)}`)
@@ -248,6 +292,8 @@ async function ensureLiveAgent(
     try {
       const handle = await agents.resume({ resumeSessionId: sessionId, signal: AbortSignal.timeout(20000) })
       console.log(`[dsh-zotero] ensureLive ${sessionId} resumed status=${String((handle.agent as any).status ?? '?')}`)
+      grantFullAccess(deps, handle.agent)
+      restrictTools(handle.agent)
       return handle.agent
     } catch (err: unknown) {
       console.log(`[dsh-zotero] ensureLive ${sessionId} resume failed: ${String((err as Error)?.message ?? err)}`)
@@ -558,6 +604,8 @@ export interface PanelApiDeps {
   sessionPersistence?: unknown
   /** Host session controller (optional) — 文献会话模型选择（chat-select-model）。 */
   sessionController?: unknown
+  /** Host permission presets (optional) — 文献会话权限提升（danger-full-access）。 */
+  permissionPresets?: unknown
 }
 
 export interface PanelRouteHandler {
@@ -662,6 +710,17 @@ async function handle(
       if (path === '/chat-open') return send(res, 200, await openPaperChatSession(deps, body))
       if (path === '/chat-open-library') return send(res, 200, await openLibraryChatSession(deps, body))
       if (path === '/chat-send') return send(res, 200, await sendChatMessage(deps, body))
+      if (path === '/chat-cancel') {
+        const sid = String(body.sessionId ?? '')
+        const agent = agentsOf(deps)?.get(sid)
+        if (!agent?.cancel) return send(res, 200, { ok: false, error: '会话未运行（无 cancel）' })
+        try {
+          agent.cancel({ kind: 'user' }, { keepInbox: true })
+          return send(res, 200, { ok: true })
+        } catch (err: any) {
+          return send(res, 200, { ok: false, error: String(err?.message ?? err) })
+        }
+      }
       if (path === '/chat-select-model') return send(res, 200, await selectChatModel(deps, body))
       if (path === '/chat-history-delete') {
         const kind = String(body.kind ?? 'paper')

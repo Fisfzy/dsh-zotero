@@ -88,8 +88,6 @@ export interface ZoteroCollection {
   parentKey: string | null
   /** Number of direct child items (meta.numItems when available). */
   itemCount?: number
-  /** Child collection keys (only populated when listing with full tree intent). */
-  childKeys: string[]
   /** Depth in the tree; -1 for root-level collections. */
   depth: number
 }

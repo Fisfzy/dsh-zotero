@@ -20,7 +20,7 @@ import { registerM2Tools } from './tools-m2.ts'
 import { Config } from './config.ts'
 import type { Config as ZoteroConfig } from './config.ts'
 import type { ResolvedModel } from './ml.ts'
-import { API_PREFIX, PLUGIN_ID, panelApiHandler, pushChatLog } from './panel-api.ts'
+import { API_PREFIX, PLUGIN_ID, panelApiHandler, pushChatLog, settleRunning } from './panel-api.ts'
 import { composeConfig, setActiveConfig, setBaseConfig } from './runtime.ts'
 
 type HostContext = Context & {
@@ -90,6 +90,7 @@ export function apply(ctx: HostContext, config: ZoteroConfig): void {
             agents: ctx.get('agents'),
             sessionPersistence: ctx.get('sessionPersistence'),
             sessionController: ctx.get('sessionController'),
+            permissionPresets: ctx.get('permissionPresets'),
           })(req as never, res as never),
       })
       log(`route registered ${API_PREFIX}`)
@@ -145,6 +146,9 @@ export function apply(ctx: HostContext, config: ZoteroConfig): void {
         const name = toolNames.get(`${sid}:${callId}`) ?? 'tool'
         const ok = !block?.isError && !data?.error
         pushChatLog(sid, { kind: 'tool', name, text: '', running: false, ok, at: Date.now() })
+      } else if (type === 'turn/end') {
+        // turn 结束（含 cancel/失败/完成）：复位该会话所有 running 标记，UI 停止闪烁。
+        settleRunning(sid)
       }
     } catch { /* 事件缓存是尽力而为 */ }
   })

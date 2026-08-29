@@ -241,6 +241,13 @@ export function ChatWindow(): JSX.Element {
     }
   }
 
+  /** 停止生成（保留排队，可再发消息继续）。 */
+  async function stop(): Promise<void> {
+    if (!active) return
+    const r = await apiPost('/chat-cancel', { sessionId: active.sessionId })
+    if (!r.ok) setNote(`⚠️ ${r.error ?? '停止失败'}`)
+  }
+
   async function send(textArg?: string, chipsArg?: PaperChip[]): Promise<void> {
     const text = (textArg ?? input).trim()
     const useChips = chipsArg ?? chips
@@ -545,6 +552,9 @@ export function ChatWindow(): JSX.Element {
             <button className="dshz-btn primary" disabled={sending || !active || !input.trim()} onClick={() => void send()}>
               {sending ? '…' : '发送'}
             </button>
+            {messages.some((m) => m.running) ? (
+              <button className="dshz-btn" onClick={() => void stop()} title="停止当前生成（保留队列）">■ 停止</button>
+            ) : null}
           </div>
           {/* 模型行 */}
           <div className="dshz-model-row">
