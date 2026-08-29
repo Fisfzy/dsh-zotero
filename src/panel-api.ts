@@ -166,16 +166,30 @@ function agentsOf(deps: PanelApiDeps): AgentsLike | undefined {
 }
 
 /**
- * 激活（或恢复）一个文献会话：live 优先；否则 create（新 id）失败则
- * resume（已持久化、web 重启后的冷会话）。
+ * 激活（或恢复）一个文献会话。优先 **GUI 同款官方路径**：
+ *   sessionController.create（adopt/装配 agentPreset·workspace·loop 全套）
+ *   → agents.get 取 live；兜底直连 factory create / resume。
  */
 async function ensureLiveAgent(
-  agents: AgentsLike,
+  deps: PanelApiDeps,
   sessionId: string,
   cwd?: string,
 ): Promise<AgentLike> {
-  const live = agents.get(sessionId)
+  const agents = agentsOf(deps)
+  const sc = deps.sessionController as
+    | { create?(req: { sessionId: string; cwd?: string }): Promise<unknown> }
+    | undefined
+  if (sc?.create) {
+    try {
+      await sc.create({ sessionId, ...(cwd ? { cwd } : {}) })
+    } catch (err: unknown) {
+      console.log(`[dsh-zotero] sessionController.create failed (${sessionId}): ${String((err as Error)?.message ?? err)}`)
+    }
+  }
+  const live = agents?.get(sessionId)
+  console.log(`[dsh-zotero] ensureLive ${sessionId} after-controller live=${live ? String((live as any).status ?? '?') : 'none'}`)
   if (live) return live
+  if (!agents) throw new Error('agents 服务不可用')
   if (agents.create) {
     try {
       const handle = await agents.create({
@@ -183,14 +197,19 @@ async function ensureLiveAgent(
         ...(cwd ? { meta: { cwd } } : {}),
         signal: AbortSignal.timeout(20000),
       })
+      console.log(`[dsh-zotero] ensureLive ${sessionId} created status=${String((handle.agent as any).status ?? '?')}`)
       return handle.agent
-    } catch { /* id 已持久化或冲突 → 走 resume */ }
+    } catch (err: unknown) {
+      console.log(`[dsh-zotero] ensureLive ${sessionId} create failed: ${String((err as Error)?.message ?? err)}`)
+    }
   }
   if (agents.resume) {
     try {
       const handle = await agents.resume({ resumeSessionId: sessionId, signal: AbortSignal.timeout(20000) })
+      console.log(`[dsh-zotero] ensureLive ${sessionId} resumed status=${String((handle.agent as any).status ?? '?')}`)
       return handle.agent
     } catch (err: unknown) {
+      console.log(`[dsh-zotero] ensureLive ${sessionId} resume failed: ${String((err as Error)?.message ?? err)}`)
       throw new Error(`文献会话激活失败: ${String((err as Error)?.message ?? err)}`)
     }
   }
@@ -209,6 +228,36 @@ function followupText(agent: AgentLike, text: string): void {
     content: [{ type: 'text', text }],
     source: { kind: 'user' },
   }))
+}
+
+/**
+ * 发送用户消息到文献会话（GUI 同款路径）：
+ *  1) sessionController.prompt（mode:'queue'，进 inbox + wake driver，GUI 输入同语义）
+ *  2) 降级：agents.followup（老路径，部分场景不 wake）
+ *  @returns 使用的路径名（'controller' | 'agent'）
+ */
+async function deliverChatMessage(deps: PanelApiDeps, sessionId: string, text: string): Promise<'controller' | 'agent'> {
+  const sc = deps.sessionController as
+    | { prompt?(req: { sessionId: string; mode: string; content: Array<{ type: string; text: string }>; requestId: string }, signal?: AbortSignal): Promise<unknown> }
+    | undefined
+  if (sc?.prompt) {
+    try {
+      await sc.prompt({
+        sessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text }],
+        requestId: `dshz-${crypto.randomUUID()}`,
+      }, AbortSignal.timeout(10000))
+      return 'controller'
+    } catch (err: unknown) {
+      console.log(`[dsh-zotero] prompt via controller failed (${sessionId}): ${String((err as Error)?.message ?? err)}`)
+    }
+  }
+  const agents = agentsOf(deps)
+  if (!agents) throw new Error('agents 服务不可用')
+  const agent = await ensureLiveAgent(deps, sessionId, undefined)
+  followupText(agent, text)
+  return 'agent'
 }
 
 /** 从 body.parent（主会话 id）解析 cwd：live agent 直读，冷会话走 sessionPersistence.inspect。 */
@@ -248,7 +297,7 @@ export async function openPaperChatSession(
 
   let agent: AgentLike
   try {
-    agent = await ensureLiveAgent(agents, sessionId, cwd)
+    agent = await ensureLiveAgent(deps, sessionId, cwd)
   } catch (err: unknown) {
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
@@ -268,7 +317,10 @@ export async function openPaperChatSession(
       ...(store.library ? { library: store.library } : {}),
     })
   }
-  if (body.sendRead) followupText(agent, READ_PROMPT)
+  if (body.sendRead) {
+    const via = await deliverChatMessage(deps, sessionId, READ_PROMPT)
+    console.log(`[dsh-zotero] sendRead via=${via}`)
+  }
   // History 标题跟随最新打开时的标题（已存在会话也更新）。
   if (entry && body.title && body.title !== entry.title) {
     writeChatStore({
@@ -296,7 +348,7 @@ export async function openLibraryChatSession(
 
   let agent: AgentLike
   try {
-    agent = await ensureLiveAgent(agents, sessionId, cwd)
+    agent = await ensureLiveAgent(deps, sessionId, cwd)
   } catch (err: unknown) {
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
@@ -311,7 +363,7 @@ export async function openLibraryChatSession(
     })
   }
   if (body.sendIntro) {
-    followupText(agent, '你好！请先简单介绍你能做什么，并给我 3 个可立即使用的示例问题。')
+    await deliverChatMessage(deps, sessionId, '你好！请先简单介绍你能做什么，并给我 3 个可立即使用的示例问题。')
   }
   return { ok: true, sessionId, chars }
 }
@@ -328,7 +380,7 @@ export async function sendChatMessage(
   if (!sessionId || !text) return { ok: false, error: '需要 sessionId + text' }
   let agent: AgentLike
   try {
-    agent = await ensureLiveAgent(agents, sessionId, String(body.cwd ?? '') || undefined)
+    agent = await ensureLiveAgent(deps, sessionId, String(body.cwd ?? '') || undefined)
   } catch (err: unknown) {
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
@@ -346,7 +398,8 @@ export async function sendChatMessage(
         chars += built.chars
       }
     }
-    followupText(agent, text)
+    const via = await deliverChatMessage(deps, sessionId, text)
+    console.log(`[dsh-zotero] chat-send via=${via} session=${sessionId}`)
     return { ok: true, chars }
   } catch (err: unknown) {
     return { ok: false, error: String((err as Error)?.message ?? err) }
