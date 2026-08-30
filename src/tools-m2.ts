@@ -33,7 +33,15 @@ const DEFAULT_SUMMARY_PROMPT = `你是文献精读助手。基于用户提供的
 - 区分“原文直接陈述”和“你的归纳/推断”：推断部分明确说明是你的解读。
 - 引用原文关键句时保留原文语言，如需翻译放到引文之外。
 - 输出用中文（除非用户指明其它语言）；先给结论，再给支撑。
-- 若全文片段不足以回答（如只看到摘要），明确说明覆盖范围与局限。`
+- 若全文片段不足以回答（如只看到摘要），明确说明覆盖范围与局限。
+
+结构化输出约定（概述模式）：用以下小节组织，忠于原文：
+1. **一句话贡献**：这篇论文用一句话解决了什么问题。
+2. **研究背景与动机**：为什么做（≤3 句）。
+3. **方法**：方法途径与关键设计（含求解/验证手段）。
+4. **关键结果**：带数字的结果（数值必须来自原文，注明条件）。
+5. **局限与争议**：作者自述局限；若无，标注“未见作者明确自述”。
+6. **对你的启发**：若与你关注的领域有关，点出可迁移之处。`
 
 const DEFAULT_TRANSLATE_PROMPT = `你是学术文献翻译助手。把用户提供的文献文本翻译为目标语言：
 - 忠实于原文语义与术语；公式/代码/符号保持原样；数字不得改动。
@@ -68,36 +76,43 @@ export async function ensureParsed(
   exec?: { signal?: AbortSignal },
 ): Promise<ParsedPaper> {
   const cfg = currentConfig()
-  const got = await client.scoped(exec?.signal).getItem(itemKey)
-  if (!got.found || !got.item) {
+  const got = itemKey ? await client.scoped(exec?.signal).getItem(itemKey) : null
+  if (itemKey && got && (!got.found || !got.item)) {
     throw new Error(`条目不存在: ${itemKey}（${got.error}）`)
   }
-  const item = got.item
-  const pdfs = item.attachments.filter((a) => a.isPdf)
-  const attachment =
-    (attachmentKey ? item.attachments.find((a) => a.key === attachmentKey) : undefined) ?? pdfs[0]
-  if (!attachment) {
-    throw new Error(`条目 ${itemKey} 没有 PDF 附件（共 ${item.attachments.length} 个附件，类型: ${item.attachments.map((a) => a.contentType).join(', ') || '无'}）`)
+  // 附件直解析模式（itemKey 可空）：attachmentKey 必填，标题回退到附件名。
+  const item = (got?.item ?? null) as { title?: string; attachments?: Array<{ key: string; isPdf: boolean; title?: string }> } | null
+  const atts = item?.attachments ?? []
+  const attachment = item
+    ? (attachmentKey ? atts.find((a) => a.key === attachmentKey) : undefined) ?? atts.filter((a) => a.isPdf)[0]
+    : null
+  if (item && !attachment) {
+    throw new Error(`条目 ${itemKey} 没有 PDF 附件（共 ${atts.length} 个附件）`)
   }
+  if (!item && !attachmentKey) {
+    throw new Error('需要 attachmentKey（附件直解析模式）')
+  }
+  const attKey = attachment?.key ?? String(attachmentKey ?? '')
+  const attTitle = attachment?.title ?? String(attKey)
 
-  const cached = readCachedMd(cfg, attachment.key)
+  const cached = readCachedMd(cfg, attKey)
   if (cached && mode !== 'text') {
     return {
-      attachmentKey: attachment.key,
-      title: item.title || attachment.title,
+      attachmentKey: attKey,
+      title: item?.title || attTitle,
       md: cached,
       source: 'cache',
-      cacheDir: attachmentCacheDir(cfg, attachment.key),
+      cacheDir: attachmentCacheDir(cfg, attKey),
       textChars: cached.length,
     }
   }
 
-  const pdf = await fetchAttachmentPdf(client, attachment.key, cfg, exec?.signal)
+  const pdf = await fetchAttachmentPdf(client, attKey, cfg, exec?.signal)
 
   if (mode === 'text') {
     const md = await pdfToText(pdf.bytes)
-    const { dir } = writeCache(cfg, attachment.key, md, [], 'pdftotext', 'pdftotext')
-    return { attachmentKey: attachment.key, title: item.title || attachment.title, md, source: 'pdftotext', cacheDir: dir, textChars: md.length }
+    const { dir } = writeCache(cfg, attKey, md, [], 'pdftotext', 'pdftotext', item?.title || attTitle)
+    return { attachmentKey: attKey, title: item?.title || attTitle, md, source: 'pdftotext', cacheDir: dir, textChars: md.length }
   }
 
   try {
@@ -107,10 +122,10 @@ export async function ensureParsed(
       fileName: pdf.fileName,
       signal: exec?.signal,
     })
-    const { dir } = writeCache(cfg, attachment.key, parsed.md, parsed.imageFiles, cfg.mineruMode === 'cloud' ? 'cloud' : cfg.mineruLocalBackend, parsed.source)
+    const { dir } = writeCache(cfg, attKey, parsed.md, parsed.imageFiles, cfg.mineruMode === 'cloud' ? 'cloud' : cfg.mineruLocalBackend, parsed.source, item?.title || attTitle)
     return {
-      attachmentKey: attachment.key,
-      title: item.title || attachment.title,
+      attachmentKey: attKey,
+      title: item?.title || attTitle,
       md: parsed.md,
       source: parsed.source,
       cacheDir: dir,
@@ -119,10 +134,10 @@ export async function ensureParsed(
   } catch (err) {
     // MinerU 失败 → pdftotext 降级（显式标注）。
     const md = await pdfToText(pdf.bytes)
-    const { dir } = writeCache(cfg, attachment.key, md, [], 'pdftotext', `pdftotext(降级:${domainError(err).error})`)
+    const { dir } = writeCache(cfg, attKey, md, [], 'pdftotext', `pdftotext(降级:${domainError(err).error})`, item?.title || attTitle)
     return {
-      attachmentKey: attachment.key,
-      title: item.title || attachment.title,
+      attachmentKey: attKey,
+      title: item?.title || attTitle,
       md,
       source: `pdftotext(降级:${domainError(err).error})`,
       cacheDir: dir,
@@ -412,12 +427,13 @@ export function registerM2Tools(
     defineTool({
       name: 'zotero_summarize',
       description:
-        'Summarize a paper from the Zotero library using the configured DSH model. mode=overview gives a full summary; mode=targeted answers one specific question/interest (pass query). Grounded in the parsed full text (MinerU cache preferred).',
+        'Summarize a paper from the Zotero library using the configured DSH model. mode=overview gives a structured summary (contribution/method/results/limits); mode=deep expands per-chapter; mode=targeted answers one specific question/interest (pass query). depth=brief|standard|deep controls length. Grounded in the parsed full text (MinerU cache preferred).',
       parameters: {
         itemKey: { type: 'string', required: true, description: 'Zotero item key (paper).' },
         attachmentKey: { type: 'string' },
-        mode: { type: 'string', enum: ['overview', 'targeted'], description: 'overview = whole paper; targeted = answer query.' },
+        mode: { type: 'string', enum: ['overview', 'targeted', 'deep'], description: 'overview = whole paper; targeted = answer query; deep = per-chapter.' },
         query: { type: 'string', description: 'For targeted mode: the specific question/interest.' },
+        depth: { type: 'string', enum: ['brief', 'standard', 'deep'], description: 'Length: brief (≤250 字速览) / standard / deep.' },
       },
       output: {
         schema: {
@@ -427,6 +443,7 @@ export function registerM2Tools(
             status: { type: 'string', required: true },
             title: { type: 'string', required: true },
             mode: { type: 'string', required: true },
+            depth: { type: 'string', required: true },
             summary: { type: 'string', required: true },
             source: { type: 'string', required: true },
             textChars: { type: 'integer', required: true },
@@ -439,7 +456,7 @@ export function registerM2Tools(
       },
       timeoutMs: 600_000,
       execute: async (args, exec) => {
-        return runSummary(client, cfg, llm, agentDefaultModel, args as { itemKey: string; attachmentKey?: string; mode?: string; query?: string }, exec)
+        return runSummary(client, cfg, llm, agentDefaultModel, args as { itemKey: string; attachmentKey?: string; mode?: string; query?: string; depth?: string }, exec)
       },
       isConcurrencySafe: () => true,
       presentCall: (args) => ({
@@ -526,6 +543,280 @@ export function registerM2Tools(
       }),
     }),
   )
+
+  /* ── zotero_batch_summarize：多篇批量总结 + 横向对比 ─────────────── */
+
+  ctx.tools.register(
+    defineTool({
+      name: 'zotero_batch_summarize',
+      description:
+        'Batch-summarize 2-10 papers from the library (structured overview each), then produce a 300-500 char cross-paper comparison (methods lineage, consensus, divergence, gaps). Grounded in MinerU full-text cache.',
+      parameters: {
+        itemKeys: { type: 'array', items: { type: 'string' }, description: 'Zotero item keys (2-10).' },
+        depth: { type: 'string', enum: ['brief', 'standard'], description: 'Per-paper length (default standard).' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', required: true },
+            items: {
+              type: 'array', required: true,
+              items: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  key: { type: 'string', required: true },
+                  title: { type: 'string', required: true },
+                  year: { type: 'integer' },
+                  summary: { type: 'string', required: true },
+                },
+              },
+            },
+            comparison: { type: 'string', required: true },
+            errors: { type: 'array', items: { type: 'string' }, required: true },
+            error: { type: 'string', required: true },
+            hint: { type: 'string', required: true },
+          },
+        },
+        render: renderJson,
+      },
+      timeoutMs: 900_000,
+      execute: async (args, exec) => {
+        const a = args as { itemKeys?: string[]; depth?: string }
+        const keys = (a.itemKeys ?? []).filter(Boolean).slice(0, 10)
+        if (keys.length < 2) {
+          return { status: 'error', items: [], comparison: '', errors: ['至少提供 2 篇论文'], error: '至少提供 2 篇论文', hint: '' }
+        }
+        const items: Array<{ key: string; title: string; year?: number; summary: string }> = []
+        const errors: string[] = []
+        let cursor = 0
+        const worker = async (): Promise<void> => {
+          while (cursor < keys.length) {
+            const k = keys[cursor++]
+            try {
+              const r = await runSummary(client, cfg, llm, agentDefaultModel, { itemKey: k, mode: 'overview', depth: a.depth ?? 'standard' }, exec)
+              if (r.status === 'ok') {
+                const got = await client.scoped().getItem(k)
+                const item = (got as any)?.item ?? {}
+                items.push({ key: k, title: r.title, year: item?.year, summary: r.summary })
+              } else {
+                errors.push(`${k}: ${r.error || '总结失败'}`)
+              }
+            } catch (e: any) {
+              if (e?.name === 'AbortError') throw e
+              errors.push(`${k}: ${String(e?.message ?? e)}`)
+            }
+          }
+        }
+        await Promise.all([worker(), worker()])
+        if (!items.length) return { status: 'error', items: [], comparison: '', errors, error: errors.join('; '), hint: '' }
+        let comparison = ''
+        try {
+          const model = resolveModel(agentDefaultModel)
+          const digest = items.map((it, i) => `[${i + 1}] 《${it.title}》${it.year ? ` (${it.year})` : ''}\n${it.summary.slice(0, 800)}`).join('\n\n')
+          comparison = await streamText(llm, model, {
+            system: '你是科研文献助理。对下列 N 篇论文做 300-500 字横向对比：共同主题与聚焦点、方法谱系的分叉、核心共识、主要分歧或互补、对你想到的空白。用 [编号] 标注引用。只输出对比文本。',
+            user: `论文要点：\n${digest}`,
+            signal: exec?.signal,
+            maxTokens: 1200,
+          })
+        } catch { /* comparison 尽力而为 */ }
+        return { status: 'ok', items, comparison, errors, error: '', hint: '' }
+      },
+      isConcurrencySafe: () => true,
+      presentCall: (args) => ({
+        card: 'generic',
+        title: `批量总结 ${String((args as { itemKeys?: unknown[] }).itemKeys?.length ?? '')} 篇`,
+        kind: 'other',
+        rawInput: args,
+      }),
+    }),
+  )
+
+  /* ── zotero_review：跨篇文献综述（要点提炼 → 综述合成） ─────────── */
+
+  ctx.tools.register(
+    defineTool({
+      name: 'zotero_review',
+      description:
+        'Write a cross-paper literature review from your library: per-paper point extraction (≤500 chars each) then a structured review (research lineage / method families / consensus / disagreements / gaps & outlook, cited with [n]). Pass itemKeys (2-12), or query+n to auto-collect from the library.',
+      parameters: {
+        itemKeys: { type: 'array', items: { type: 'string' }, description: 'Zotero item keys (2-12); mutex with query.' },
+        query: { type: 'string', description: 'Keyword query to collect papers (title/creator/year).' },
+        n: { type: 'number', description: 'Max papers when using query (default 6, max 12).' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', required: true },
+            review: { type: 'string', required: true },
+            papers: {
+              type: 'array', required: true,
+              items: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  key: { type: 'string', required: true },
+                  title: { type: 'string', required: true },
+                  year: { type: 'integer' },
+                  points: { type: 'string', required: true },
+                },
+              },
+            },
+            errors: { type: 'array', items: { type: 'string' }, required: true },
+            error: { type: 'string', required: true },
+            hint: { type: 'string', required: true },
+          },
+        },
+        render: renderJson,
+      },
+      timeoutMs: 1_200_000,
+      execute: async (args, exec) => {
+        const a = args as { itemKeys?: string[]; query?: string; n?: number }
+        let keys: string[] = (a.itemKeys ?? []).filter(Boolean).slice(0, 12)
+        if (keys.length < 2 && a.query?.trim()) {
+          try {
+            const r = await client.scoped().search({ query: a.query.trim(), limit: Math.min(Math.max(a.n ?? 6, 3), 12), qmode: 'titleCreatorYear' })
+            keys = r.items.map((i) => i.key).filter(Boolean)
+          } catch (e: any) {
+            return { status: 'error', review: '', papers: [], errors: [`检索失败: ${String(e?.message ?? e)}`], error: '检索失败', hint: '' }
+          }
+        }
+        if (keys.length < 2) {
+          return { status: 'error', review: '', papers: [], errors: ['至少提供 2 篇论文（或可用 query 检索）'], error: '至少提供 2 篇论文', hint: '' }
+        }
+        const cfgNow = currentConfig()
+        const papers: Array<{ key: string; title: string; year?: number; points: string }> = []
+        const errors: string[] = []
+        let cursor = 0
+        const worker = async (): Promise<void> => {
+          while (cursor < keys.length) {
+            const k = keys[cursor++]
+            try {
+              const parsed = await ensureParsed(client, cfgNow, 'auto', k, undefined, exec)
+              const window = buildWindow(parsed.md, undefined, 6000)
+              const model = resolveModel(agentDefaultModel)
+              const points = await streamText(llm, model, {
+                system: '你是文献要点提炼器。基于论文片段输出 ≤500 字中文要点：核心问题、方法途径、关键结果（带数字）、局限。只输出要点。',
+                user: `论文：《${parsed.title}》\n片段：\n${window.text}`,
+                signal: exec?.signal,
+                maxTokens: 900,
+              })
+              const got = await client.scoped().getItem(k)
+              const item = (got as any)?.item ?? {}
+              papers.push({ key: k, title: parsed.title, year: item?.year, points })
+            } catch (e: any) {
+              if (e?.name === 'AbortError') throw e
+              errors.push(`${k}: ${String(e?.message ?? e)}`)
+            }
+          }
+        }
+        await Promise.all([worker(), worker()])
+        if (!papers.length) return { status: 'error', review: '', papers: [], errors, error: errors.join('; '), hint: '' }
+        const digest = papers.map((p, i) => `[${i + 1}] 《${p.title}》${p.year ? ` (${p.year})` : ''}\n${p.points}`).join('\n\n')
+        const model = resolveModel(agentDefaultModel)
+        const review = await streamText(llm, model, {
+          system: '你是科研文献综述助手。基于下面每篇论文的要点，撰写一篇结构化的中文文献综述：\n1 引言与研究脉络 2 方法谱系（不同技术路径的分叉与传承） 3 重要发现与共识 4 分歧与争议 5 空白与展望\n引用用 [编号]（如 [1][3]）。忠于要点内容，不虚构。输出综述正文（不需要前言后语）。',
+          user: `论文要点：\n${digest}`,
+          signal: exec?.signal,
+          maxTokens: 4096,
+        })
+        return { status: 'ok', review, papers, errors, error: '', hint: '' }
+      },
+      isConcurrencySafe: () => true,
+      presentCall: (args) => ({
+        card: 'generic',
+        title: '跨篇综述',
+        kind: 'other',
+        rawInput: args,
+      }),
+    }),
+  )
+
+  /* ── zotero_related：相关文献（确定性关键词相似度，零 LLM） ─────── */
+
+  ctx.tools.register(
+    defineTool({
+      name: 'zotero_related',
+      description:
+        'Find related papers in your library by deterministic keyword overlap against the target item (title+abstract), zero-LLM. Returns top matches with a score (0-1).',
+      parameters: {
+        itemKey: { type: 'string', required: true, description: 'Target Zotero item key.' },
+        limit: { type: 'number', description: 'Max results (default 5).' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', required: true },
+            target: { type: 'string', required: true },
+            related: {
+              type: 'array', required: true,
+              items: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  key: { type: 'string', required: true },
+                  title: { type: 'string', required: true },
+                  year: { type: 'integer' },
+                  score: { type: 'number', required: true },
+                },
+              },
+            },
+            totalScanned: { type: 'integer', required: true },
+            error: { type: 'string', required: true },
+            hint: { type: 'string', required: true },
+          },
+        },
+        render: renderJson,
+      },
+      timeoutMs: 120_000,
+      execute: async (args) => {
+        const a = args as { itemKey: string; limit?: number }
+        const limit = Math.min(Math.max(a.limit ?? 5, 1), 10)
+        const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'under', 'using', 'based', 'non', 'via', 'its', 'their', 'are', 'was', 'were', 'have', 'has', 'can', 'may', 'any', 'all', 'not', 'but', 'or', 'in', 'on', 'at', 'of', 'to', 'a', 'an', 'is', 'be', 'by', 'as', 'it', 'we', 'our', 'new', 'over', 'such', 'more', 'most', 'between', 'been', 'both', 'each', 'these', 'those'])
+        const tokenize = (s: string): Set<string> =>
+          new Set(String(s ?? '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOP.has(w)))
+        try {
+          const target = await client.scoped().getItem(a.itemKey)
+          if (!target.found || !target.item) return { status: 'error', target: '', related: [], totalScanned: 0, error: `条目不存在: ${a.itemKey}`, hint: '' }
+          const title = String(target.item.title ?? '')
+          const abstract = String(target.item.abstractNote ?? '')
+          const tTokens = tokenize(`${title} ${abstract}`)
+          const queryTerms = [...tTokens].slice(0, 4).join(' ')
+          if (!queryTerms.trim()) return { status: 'error', target: title, related: [], totalScanned: 0, error: '条目缺少可检索文本', hint: '' }
+          const search = await client.scoped().search({ query: queryTerms, limit: 30, qmode: 'titleCreatorYear' })
+          const scored: Array<{ key: string; title: string; year?: number; score: number }> = []
+          for (const cand of search.items) {
+            if (cand.key === a.itemKey) continue
+            const cItems = await client.scoped().getItem(cand.key).catch(() => null)
+            const c = (cItems as any)?.item ?? null
+            if (!c) continue
+            const cTokens = tokenize(`${c.title ?? ''} ${c.abstractNote ?? ''}`)
+            if (!cTokens.size) continue
+            let inter = 0
+            for (const w of cTokens) if (tTokens.has(w)) inter += 1
+            const score = inter / Math.max(1, Math.min(cTokens.size, tTokens.size))
+            scored.push({ key: cand.key, title: String(c.title ?? '(无标题)'), year: c.year, score: Math.round(score * 100) / 100 })
+          }
+          scored.sort((x, y) => y.score - x.score || String(y.title).localeCompare(String(x.title)))
+          const related = scored.filter((r) => r.score > 0).slice(0, limit)
+          return { status: 'ok', target: title, related, totalScanned: search.items.length - 1, error: '', hint: '基于题名+摘要关键词重叠（确定性，无 LLM）' }
+        } catch (err: any) {
+          return { status: 'error', target: '', related: [], totalScanned: 0, error: String(err?.message ?? err), hint: '' }
+        }
+      },
+      isConcurrencySafe: () => true,
+      presentCall: (args) => ({
+        card: 'generic',
+        title: `相关文献: ${String((args as { itemKey?: unknown }).itemKey ?? '')}`,
+        kind: 'other',
+        rawInput: args,
+      }),
+    }),
+  )
 }
 
 function readImagesCount(parsed: ParsedPaper): number {
@@ -544,12 +835,13 @@ export async function runSummary(
   _cfg: Config,
   llm: LlmService,
   agentDefaultModel: { currentSelection(): ResolvedModel } | undefined,
-  a: { itemKey: string; attachmentKey?: string; mode?: string; query?: string },
+  a: { itemKey: string; attachmentKey?: string; mode?: string; query?: string; depth?: string },
   exec?: { signal?: AbortSignal },
 ): Promise<{
   status: string
   title: string
   mode: string
+  depth: string
   summary: string
   source: string
   textChars: number
@@ -560,25 +852,36 @@ export async function runSummary(
   const cfg = currentConfig()
   try {
     const parsed = await ensureParsed(client, cfg, 'auto', a.itemKey, a.attachmentKey, exec)
-    const mode = a.mode === 'targeted' ? 'targeted' : 'overview'
+    const mode = a.mode === 'targeted' ? 'targeted' : a.mode === 'deep' ? 'deep' : 'overview'
     const query = a.query ?? ''
-    const budgetChars = Math.max(cfg.fullTextTokenBudget * 3, 8000)
+    const depth = a.depth === 'brief' || a.depth === 'deep' ? a.depth : 'standard'
+    const budgetMultiplier = depth === 'deep' ? 8 : mode === 'targeted' ? 3 : 4
+    const budgetChars = Math.max(cfg.fullTextTokenBudget * budgetMultiplier, 8000)
     const window = buildWindow(parsed.md, mode === 'targeted' && query ? query : undefined, budgetChars)
     const model = resolveModel(agentDefaultModel)
     const system = cfg.summaryPrompt.trim() || DEFAULT_SUMMARY_PROMPT
+    const depthHint =
+      depth === 'brief'
+        ? '用户要速览：全文 ≤250 字，只给一句话贡献、方法与最关键结果。'
+        : depth === 'deep'
+          ? '用户要深度：按小节完整展开，数字与条件尽量保留；若窗口含多章，逐章给出要点。'
+          : '标准长度即可。'
     const user = mode === 'targeted'
       ? `论文：《${parsed.title}》\n用户问题：${query}\n\n全文节选（相关章节）：\n${window.text}`
-      : `论文：《${parsed.title}》\n请按概述模式总结：核心问题（1 句）、主要方法、关键结果（带数字）、局限与作者解读。\n\n全文节选：\n${window.text}`
+      : mode === 'deep'
+        ? `论文：《${parsed.title}》\n请按概述模式+深度展开：核心问题、主要方法（含关键设计）、带数字的关键结果、作者自述局限、可迁移之处。\n\n全文节选：\n${window.text}`
+        : `论文：《${parsed.title}》\n请按概述模式总结：核心问题、主要方法、关键结果（带数字）、局限与作者解读。\n${depthHint}\n\n全文节选：\n${window.text}`
     const summary = await streamText(llm, model, {
       system,
       user,
       signal: exec?.signal,
-      maxTokens: 4096,
+      maxTokens: depth === 'brief' ? 1200 : mode === 'deep' ? 8192 : 4096,
     })
     return {
       status: 'ok',
       title: parsed.title,
       mode,
+      depth: a.depth ?? 'standard',
       summary,
       source: parsed.source,
       textChars: parsed.textChars,
@@ -587,7 +890,7 @@ export async function runSummary(
       hint: '',
     }
   } catch (err: any) {
-    const d = { ...domainError(err), status: 'error' as const, title: '', mode: (a.mode === 'targeted' ? 'targeted' : 'overview') as string, summary: '', source: '', textChars: 0, sections: [] as string[] }
+    const d = { ...domainError(err), status: 'error' as const, title: '', mode: (a.mode === 'targeted' ? 'targeted' : 'overview') as string, depth: a.depth ?? 'standard', summary: '', source: '', textChars: 0, sections: [] as string[] }
     return d
   }
 }

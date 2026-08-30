@@ -103,6 +103,10 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
   const [config, setConfig] = useState<Record<string, unknown>>({})
   const [form, setForm] = useState<Record<string, string>>({})
   const [note, setNote] = useState('')
+  /** MD 解析管理：overview 统计 / 批量任务 / 消息。 */
+  const [mo, setMo] = useState<{ ok?: boolean; total: number; parsed: number; items: any[] } | null>(null)
+  const [mj, setMj] = useState<{ state: string; total: number; done: number; current: string; errors: string[] } | null>(null)
+  const [mgMsg, setMgMsg] = useState('')
   /** 阅读模式：{论文 key, 标题, PDF 附件 key}；非空时面板主体 = PDF 阅读器。 */
   const [reading, setReading] = useState<{ key: string; title: string; attachmentKey: string } | null>(null)
   /** 设置分组展开状态（localStorage 持久化）。 */
@@ -111,7 +115,7 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
       const raw = localStorage.getItem(CFG_OPEN_KEY)
       if (raw) return { conn: true, ...JSON.parse(raw) }
     } catch { /* best-effort */ }
-    return { conn: true, mineru: false, pdf2zh: false, read: false }
+    return { conn: true, mineru: false, pdf2zh: false, mgu: false, read: false }
   })
   const sessionRef = useRef(props.sessionId)
   useEffect(() => {
@@ -130,7 +134,7 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
     })
   }
   function setAllSec(open: boolean): void {
-    const next = { conn: open, mineru: open, pdf2zh: open, read: open }
+    const next = { conn: open, mineru: open, pdf2zh: open, mgu: open, read: open }
     try { localStorage.setItem(CFG_OPEN_KEY, JSON.stringify(next)) } catch { /* best-effort */ }
     setOpenSec(next)
   }
@@ -164,10 +168,29 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
           if (String(v).startsWith('•••')) continue
           f[k] = String(v ?? '')
         }
+        // MD 解析管理：统计 + 任务状态
+        void apiGet('/mineru/overview').then((v) => setMo(v)).catch(() => {})
+        void apiGet('/mineru/job').then((r) => setMj(r.job ?? null)).catch(() => {})
         setForm(f)
       }).catch(() => {})
     }
   }, [tab])
+
+  /** MD 批量解析运行中：2s 轮询，结束后自动刷新统计。 */
+  useEffect(() => {
+    if (!mj || mj.state !== 'running') return
+    const t = setInterval(() => {
+      void apiGet('/mineru/job').then((r) => {
+        setMj(r.job ?? null)
+        if (r.job && r.job.state !== 'running') {
+          clearInterval(t)
+          void apiGet('/mineru/overview').then((v) => setMo(v)).catch(() => {})
+        }
+      }).catch(() => {})
+    }, 2000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mj?.state])
 
   /** 检索（参数显式传入，避免 setState 闭包读到旧值）。 */
   async function runSearch(q: string, coll: string): Promise<void> {
@@ -464,23 +487,31 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                 <option value="cloud">云端 mineru.net（需 API Key）</option>
               </select>
             </div>
-            {field('mineruLocalApiBase', '本地 MinerU 服务地址')}
-            <div className="dshz-field">
-              <label>本地后端引擎</label>
-              <select className="dshz-sel" value={form.mineruLocalBackend ?? 'pipeline'} onChange={(e) => setForm((f) => ({ ...f, mineruLocalBackend: e.target.value }))}>
-                <option value="pipeline">pipeline</option>
-                <option value="vlm">vlm（vlm-auto-engine）</option>
-                <option value="hybrid">hybrid（hybrid-auto-engine）</option>
-              </select>
-            </div>
-            {field('mineruCloudApiKey', 'MinerU 云端 API Key', 'password')}
-            <div className="dshz-field">
-              <label>云端模型</label>
-              <select className="dshz-sel" value={form.mineruCloudModel ?? 'vlm'} onChange={(e) => setForm((f) => ({ ...f, mineruCloudModel: e.target.value }))}>
-                <option value="vlm">vlm（默认）</option>
-                <option value="pipeline">pipeline</option>
-              </select>
-            </div>
+            {(form.mineruMode ?? 'local') === 'local' ? (
+              <>
+                {field('mineruLocalApiBase', '本地 MinerU 服务地址')}
+                <div className="dshz-field">
+                  <label>本地后端引擎</label>
+                  <select className="dshz-sel" value={form.mineruLocalBackend ?? 'pipeline'} onChange={(e) => setForm((f) => ({ ...f, mineruLocalBackend: e.target.value }))}>
+                    <option value="pipeline">pipeline</option>
+                    <option value="vlm">vlm（vlm-auto-engine）</option>
+                    <option value="hybrid">hybrid（hybrid-auto-engine）</option>
+                  </select>
+                </div>
+              </>
+            ) : null}
+            {(form.mineruMode ?? 'local') === 'cloud' ? (
+              <>
+                {field('mineruCloudApiKey', 'MinerU 云端 API Key', 'password')}
+                <div className="dshz-field">
+                  <label>云端模型</label>
+                  <select className="dshz-sel" value={form.mineruCloudModel ?? 'vlm'} onChange={(e) => setForm((f) => ({ ...f, mineruCloudModel: e.target.value }))}>
+                    <option value="vlm">vlm（默认）</option>
+                    <option value="pipeline">pipeline</option>
+                  </select>
+                </div>
+              </>
+            ) : null}
             <div className="dshz-field">
               <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <input type="checkbox" checked={form.mineruForceOcr === 'true'} onChange={(e) => setForm((f) => ({ ...f, mineruForceOcr: String(e.target.checked) }))} />
@@ -488,6 +519,52 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
               </label>
             </div>
             {field('mineruMaxAutoPages', '自动解析页数上限（daemon/后台）', 'number')}
+            </Sec>
+            <Sec label="MD 解析管理" open={!!openSec.mgu} onToggle={() => toggleSec('mgu')}>
+              <div className="dshz-note" style={{ marginBottom: 8 }}>
+                管理 MinerU 解析产物：统计库内 PDF 解析状态；「全部开始」批量解析未解析论文，
+                「修复缓存」强制重解析全部、「删除所有缓存」清空。解析结果存本地 <code>cache/mineru/</code>。
+              </div>
+              <div className="dshz-field">
+                <label>库内解析进度</label>
+                <div className="dshz-ft-progress" style={{ marginBottom: 4 }}>
+                  <div className="fill" style={{ width: `${mo && mo.total > 0 ? Math.round((mo.parsed / mo.total) * 100) : 0}%` }} />
+                </div>
+                <div className="dshz-kv">{mo ? `已解析 ${mo.parsed} / ${mo.total} 篇` : '统计中…'}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
+                <button className="dshz-btn" onClick={() => { setMgMsg(''); void apiPost('/mineru/test', {}).then((r) => setMgMsg(`🔌 ${String(r.message ?? (r.ok ? '连接正常' : '连接失败'))}`)).catch((e) => setMgMsg(`测试失败: ${String(e?.message ?? e)}`)) }}>测试连接</button>
+                {mj?.state === 'running' ? (
+                  <button className="dshz-btn" onClick={() => void apiPost('/mineru/cancel', {}).then(() => setMgMsg('已请求取消'))}>取消进度（{mj.done}/{mj.total ?? '?'}）</button>
+                ) : (
+                  <>
+                    <button className="dshz-btn primary" onClick={() => { setMgMsg(''); void apiPost('/mineru/start', {}).then((r) => { setMj(r.job); if (!r.ok) setMgMsg(`⚠ ${r.error ?? '启动失败'}`) }).catch((e) => setMgMsg(String(e?.message ?? e))) }}>全部开始</button>
+                    <button className="dshz-btn" onClick={() => { if (!window.confirm('强制重解析全部论文（含已有缓存的）？耗时较长。')) return; void apiPost('/mineru/start', { repair: true }).then((r) => { setMj(r.job); if (!r.ok) setMgMsg(`⚠ ${r.error ?? '启动失败'}`) }).catch((e) => setMgMsg(String(e?.message ?? e))) }}>修复缓存</button>
+                    <button className="dshz-btn" onClick={() => { if (!window.confirm('删除全部 MD 解析缓存？之后将重新解析。')) return; void apiPost('/mineru/clear', {}).then(async () => { setMgMsg('🗑 缓存已清空'); const v = await apiGet('/mineru/overview'); setMo(v) }).catch(() => {}) }}>删除所有缓存</button>
+                  </>
+                )}
+              </div>
+              {mj?.state === 'running' || mj?.state === 'cancelled' || mj?.state === 'done' ? (
+                <div className="dshz-note" style={{ marginBottom: 6 }}>
+                  {mj.state === 'running' ? `运行中：${mj.done}/${mj.total} · ${mj.current?.slice(0, 40) ?? ''}` : mj.state === 'cancelled' ? '已取消' : `完成：${mj.done}/${mj.total}${mj.errors?.length ? `（${mj.errors.length} 个错误）` : ''}`}
+                </div>
+              ) : null}
+              {mj?.errors?.length ? <div className="dshz-note" style={{ color: '#FF8B84', marginBottom: 6 }}>{mj.errors.slice(0, 3).join('；')}</div> : null}
+              {mgMsg ? <div className="dshz-note" style={{ marginBottom: 6 }}>{mgMsg}</div> : null}
+              {mo ? (
+                <div style={{ maxHeight: 240, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {mo.items.slice(0, 40).map((i) => (
+                    <div key={i.key} className="dshz-row" style={{ cursor: 'default', padding: '8px 11px', marginBottom: 0 }}>
+                      <div className="t" style={{ fontSize: 12.5 }}>{i.title}</div>
+                      <div className="m">
+                        <span className={`dshz-badge ${i.parsed ? 'summary' : ''}`}>{i.parsed ? '已解析' : '未解析'}</span>
+                        {i.parsed && i.sizeKb ? <span>{i.sizeKb}KB</span> : null}
+                        {i.parsed && i.source ? <span style={{ opacity: 0.7 }}>{String(i.source).slice(0, 26)}</span> : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </Sec>
             <Sec label="PDF2ZH 翻译引擎（一键全文）" open={!!openSec.pdf2zh} onToggle={() => toggleSec('pdf2zh')}>
               <div className="dshz-note" style={{ marginBottom: 8 }}>

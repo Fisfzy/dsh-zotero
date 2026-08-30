@@ -38,6 +38,14 @@ import {
   startFullTranslate,
 } from './fulltranslate.ts'
 import { cancelPdf2zh, findOutput, pdf2zhConfigured, startPdf2zh, statusPdf2zh } from './pdf2zh.ts'
+import {
+  cancelMineruBatch,
+  clearMineruCache,
+  mineruJob,
+  mineruOverview,
+  startMineruBatch,
+  testMineruConnection,
+} from './mineru-manager.ts'
 import { composeConfig, currentConfig, setActiveConfig, writeOverlay } from './runtime.ts'
 
 export const PLUGIN_ID = '@dsh-external/dsh-zotero'
@@ -47,7 +55,7 @@ const READ_PROMPT =
   '「Zotero 开读」——请以精读模式阅读上面注入的论文：先一句话概述核心贡献，再按章节提炼要点（方法/关键结果/局限），最后给 3 个可深入追问的问题。信息不足时用 zotero_read_fulltext 分段读取缓存全文（先免参拿 sections 章节偏移，再按 offset 精读各章），或用 zotero_summarize 补定向总结。'
 
 const LIBRARY_MODE_PROMPT =
-  '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_read_fulltext（读取缓存全文——先免参调用拿 sections 章节偏移，再按 offset/limit 分段精读）或 zotero_read_pdf（预览）/ zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字）。一次不要读取超过 2 篇全文，保持回答有据可查。'
+  '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_read_fulltext（读取缓存全文——先免参调用拿 sections 章节偏移，再按 offset/limit 分段精读）或 zotero_read_pdf（预览）/ zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字）。一次不要读取超过 2 篇全文，保持回答有据可查。\n\n分析能力（复刻 llm-for-zotero）：单篇总结 zotero_summarize（mode=overview|targeted|deep，depth=brief|standard|deep）；多篇 zotero_batch_summarize（2-10 篇批量总结+横向对比）；跨篇综述 zotero_review（itemKeys 或 query 自动收论文 → 要点提炼 → 综述）；相关文献 zotero_related（关键词重叠，零 LLM）。遇到“比较/总结这几篇”“写个综述”“找相关文献”类需求优先用它们。'
 
 const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey', 'pdf2zhApiKey'])
 
@@ -727,6 +735,15 @@ async function handle(
         await streamLocalFile(req, res, p)
         return
       }
+      if (path === '/mineru/overview') {
+        return send(res, 200, await mineruOverview(client))
+      }
+      if (path === '/mineru/job') {
+        return send(res, 200, { ok: true, job: mineruJob() })
+      }
+      if (path === '/mineru/test') {
+        return send(res, 200, await testMineruConnection())
+      }
     }
 
     if (req.method === 'POST') {
@@ -803,6 +820,15 @@ async function handle(
       }
       if (path === '/pdf2zh/cancel') {
         return send(res, 200, cancelPdf2zh(String(body.attachmentKey ?? '')))
+      }
+      if (path === '/mineru/start') {
+        return send(res, 200, await startMineruBatch(client, llm, agentDefaultModel, Boolean(body.repair)))
+      }
+      if (path === '/mineru/cancel') {
+        return send(res, 200, cancelMineruBatch())
+      }
+      if (path === '/mineru/clear') {
+        return send(res, 200, clearMineruCache())
       }
       if (path === '/artifacts') {
         const artifact = body as { type?: string; title?: string; payload?: string }

@@ -494,6 +494,27 @@ export class ZoteroClient {
     return `${path}/items?${parts.join('&')}`
   }
 
+  /** 枚举库内全部附件（itemType=attachment 翻页），返回 key/title/parentItem。 */
+  async listAttachments(): Promise<Array<{ key: string; title: string; parentItem: string }>> {
+    const src = await this.resolveSource().catch(() => null)
+    if (!src) return []
+    const out: Array<{ key: string; title: string; parentItem: string }> = []
+    let start = 0
+    for (let guard = 0; guard < 30; guard += 1) {
+      const r = await this.fetchJson(
+        this.buildItemsPath(`${src.base}${src.libraryPath}`, { itemType: 'attachment', limit: 100, start }),
+        src.headers,
+      )
+      const rows: Array<{ key?: string; title?: string; parentItem?: string }> = Array.isArray(r.json) ? r.json : []
+      for (const it of rows) {
+        if (it.key) out.push({ key: it.key, title: it.title ?? '', parentItem: it.parentItem ?? '' })
+      }
+      if (rows.length < 100 || out.length >= Number(r.total ?? 0)) break
+      start += 100
+    }
+    return out
+  }
+
   /** Search items across the library (metadata + optional fulltext). */
   async search(params: ZoteroSearchParams): Promise<{
     source: ZoteroSource

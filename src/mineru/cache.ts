@@ -20,6 +20,8 @@ export interface MineruManifest {
   source: string
   mdChars: number
   images: string[]
+  /** 条目标题（overview 列表展示；旧缓存可能缺失）。 */
+  title?: string
 }
 
 export function resolveCacheDir(cfg: Config): string {
@@ -59,6 +61,7 @@ export function writeCache(
   images: Array<{ relPath: string; bytes: Uint8Array }>,
   backend: string,
   source: string,
+  title?: string,
 ): { dir: string; manifest: MineruManifest } {
   const dir = attachmentCacheDir(cfg, attachmentKey)
   mkdirSync(dir, { recursive: true })
@@ -83,6 +86,7 @@ export function writeCache(
     source,
     mdChars: md.length,
     images: imageNames,
+    ...(title ? { title } : {}),
   }
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
   return { dir, manifest }
