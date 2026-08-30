@@ -54,13 +54,16 @@ export function ContrastView(props: ContrastViewProps): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.originalUrl, props.monoUrl])
 
-  /** 渲染一侧页面（canvas，按容器宽度 fit）。 */
+  /** 渲染一侧页面（canvas，按容器宽度 fit）。容器宽首次测量后定死：
+   *  避免滚动/滚动条抖动导致的宽度波动（"越滚越大"来源）。 */
+  const cwRef = useRef(0)
   function renderSide(doc: PDFDocumentProxy | null, pageNo: number, canvas: HTMLCanvasElement | null, el: HTMLDivElement | null): void {
     if (!doc || !canvas || !el) return
     void (async () => {
       try {
         const p = await doc.getPage(pageNo)
-        const containerW = el.clientWidth || 400
+        if (!cwRef.current) cwRef.current = el.clientWidth || 400
+        const containerW = cwRef.current
         const base = p.getViewport({ scale: 1 })
         const scale = containerW / base.width
         const vp = p.getViewport({ scale })

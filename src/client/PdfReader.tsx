@@ -37,6 +37,7 @@ export function FullTranslatePanel(props: { itemKey: string; attachmentKey: stri
 
   useEffect(() => {
     let cancelled = false
+    let timer: number | undefined
     void pdf2zhStart(props.itemKey, props.attachmentKey)
       .then((r) => {
         if (cancelled) return
@@ -44,16 +45,21 @@ export function FullTranslatePanel(props: { itemKey: string; attachmentKey: stri
         if (!r.ok && !r.job) setConfigured(false)
       })
       .catch(() => { /* 尽力而为 */ })
-    const timer = setInterval(() => {
+    const stopWhenSettled = (j: Pdf2zhJob | null): void => {
+      if (j && ['done', 'error', 'cancelled'].includes(j.state)) {
+        if (timer !== undefined) window.clearInterval(timer)
+      }
+    }
+    timer = window.setInterval(() => {
       void pdf2zhStatus(props.attachmentKey)
         .then((r) => {
           if (cancelled) return
           setConfigured(r.configured)
-          if (r.job) setJob(r.job)
+          if (r.job) { setJob(r.job); stopWhenSettled(r.job) }
         })
         .catch(() => { /* 尽力而为 */ })
     }, 2000)
-    return () => { cancelled = true; clearInterval(timer) }
+    return () => { cancelled = true; if (timer !== undefined) window.clearInterval(timer) }
   }, [props.itemKey, props.attachmentKey])
 
   /** 视图切换：dual=双语对照(默认) / mono=译文版 / original=原文版 / side=左右对照。 */
@@ -161,6 +167,9 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
   const [err, setErr] = useState('')
   const [numPages, setNumPages] = useState(0)
   const [baseW, setBaseW] = useState(0) // page1 的 pt 宽度（scale=1）
+  const [baseH, setBaseH] = useState(0) // page1 的 pt 高度（scale=1，实测页比例用）
+  /** 已渲染页的真实高度（覆盖占位估计；避免滚动跳动）。 */
+  const [renderedH, setRenderedH] = useState<Record<number, number>>({})
   const [pageW, setPageW] = useState(0) // 容器可用宽度 px（fit-width 基准）
   const [factor, setFactor] = useState(1)
   const [current, setCurrent] = useState(1)
@@ -185,8 +194,11 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
   const [bubble, setBubble] = useState<{ x: number; y: number; text?: string; error?: string } | null>(null)
 
   const scale = useMemo(() => (baseW > 0 && pageW > 0 ? (pageW / baseW) * factor : factor), [baseW, pageW, factor])
-  // fit-width：页面高 = 页面宽 × 1.414（近似 A4 比例；渲染后 canvas 实际尺寸为准）
-  const pageH = useMemo(() => (pageW > 0 ? pageW * 1.4142 * factor : 800), [pageW, factor])
+  // fit-width：页面高 = 页面宽 × 实测页比例（不再用 A4 近似，避免滚动/占位失真）
+  const pageH = useMemo(
+    () => (pageW > 0 && baseH > 0 && baseW > 0 ? (pageW * (baseH / baseW)) * factor : 800),
+    [pageW, baseW, baseH, factor],
+  )
 
   const scaleRef = useRef(scale); scaleRef.current = scale
   const factorRef = useRef(factor); factorRef.current = factor
@@ -211,9 +223,22 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
         if (cancelled) { try { d.destroy() } catch { /* noop */ } return }
         docRef.current = d
         setNumPages(d.numPages)
-        const p1 = await d.getPage(1)
-        const v1 = p1.getViewport({ scale: 1 })
-        setBaseW(v1.width)
+        // 页比例采样：取 1/2/3/中位页的中位数（避免封面/特殊页污染占位高度）
+        const samples: Array<{ w: number; ratio: number }> = []
+        const idxs = [1, 2, Math.min(3, d.numPages), Math.min(Math.ceil(d.numPages / 2), d.numPages)]
+        for (const idx of idxs) {
+          try {
+            const p = await d.getPage(idx)
+            const v = p.getViewport({ scale: 1 })
+            if (v.width > 0) samples.push({ w: v.width, ratio: v.height / v.width })
+          } catch { /* skip */ }
+        }
+        samples.sort((a, b) => a.ratio - b.ratio)
+        const mid = samples[Math.floor(samples.length / 2)] ?? samples[0]
+        if (mid) {
+          setBaseW(mid.w)
+          setBaseH(mid.w * mid.ratio)
+        }
         // 等待布局后量容器宽（首次渲染时 scrollRef 已有）
         requestAnimationFrame(() => {
           const el = scrollRef.current
@@ -275,6 +300,8 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
       canvas.height = Math.floor(vp.height * dpr)
       canvas.style.width = `${vp.width}px`
       canvas.style.height = `${vp.height}px`
+      // 校准页 div 高度为真实渲染高度（占位估计 → 精确，消除滚动跳动）
+      setRenderedH((prev) => (prev[i] === vp.height ? prev : { ...prev, [i]: vp.height }))
       const ctx = canvas.getContext('2d')
       if (!ctx) return
       const task = page.render({
@@ -302,7 +329,7 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
     }
   }, [])
 
-  /* ── 懒渲染：IO 触发 + 远页回收 ── */
+  /* ── 懒渲染：单 IO 触发（回收改 onScroll 节流，避免双观察者竞态） ── */
   useEffect(() => {
     if (!numPages || !baseW || !pageW) return
     const root = scrollRef.current
@@ -317,29 +344,11 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
       },
       { root, rootMargin: `${RENDER_MARGIN}px 0px` },
     )
-    const cleanup = new IntersectionObserver(
-      (entries) => {
-        for (const en of entries) {
-          const el = en.target as HTMLElement
-          const i = Number(el.dataset.page)
-          if (!en.isIntersecting && renderedRef.current.has(i)) {
-            const canvas = el.querySelector('canvas') as HTMLCanvasElement | null
-            const tl = el.querySelector('.tl') as HTMLDivElement | null
-            if (canvas) { canvas.width = 0; canvas.height = 0 }
-            if (tl) tl.innerHTML = ''
-            renderedRef.current.delete(i)
-            // 释放页对象（防内存膨胀）
-            pageCacheRef.current.delete(i)
-          }
-        }
-      },
-      { root, rootMargin: `${RENDER_MARGIN * 2}px 0px` },
-    )
     for (let i = 1; i <= numPages; i++) {
       const el = pageElsRef.current.get(i)
-      if (el) { io.observe(el); cleanup.observe(el) }
+      if (el) io.observe(el)
     }
-    return () => { io.disconnect(); cleanup.disconnect() }
+    return () => io.disconnect()
   }, [numPages, baseW, pageW, renderPage])
 
   /* ── 缩放变化 → 全量重渲染 ── */
@@ -347,6 +356,7 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
     if (!numPages) return
     renderedRef.current.clear()
     pageCacheRef.current.clear()
+    setRenderedH({})
     for (const el of pageElsRef.current.values()) {
       const canvas = el.querySelector('canvas') as HTMLCanvasElement | null
       const tl = el.querySelector('.tl') as HTMLDivElement | null
@@ -359,13 +369,40 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [factor, pageW])
 
-  /* ── 滚动联动 / 关闭浮层 ── */
+  /* ── 滚动联动 / 关闭浮层 / 远页回收（400ms 节流） ── */
+  const rcAtRef = useRef(0)
   function onScroll(): void {
     const el = scrollRef.current
     if (el) {
       const h = pageHRef.current + PAGE_GAP
       const n = Math.floor(el.scrollTop / h) + 1
       setCurrent((prev) => (prev === n ? prev : Math.min(Math.max(1, n), numPagesRef.current)))
+      // 回收远离视口的已渲染页（防内存膨胀 + 减少重绘闪烁）
+      const now = Date.now()
+      if (now - rcAtRef.current >= 400) {
+        rcAtRef.current = now
+        const vh = el.clientHeight
+        for (const i of [...renderedRef.current]) {
+          const pageTop = (i - 1) * h
+          if (Math.abs(pageTop - el.scrollTop) > vh + RENDER_MARGIN * 2.5) {
+            const pageEl = pageElsRef.current.get(i)
+            if (pageEl) {
+              const canvas = pageEl.querySelector('canvas') as HTMLCanvasElement | null
+              const tl = pageEl.querySelector('.tl') as HTMLDivElement | null
+              if (canvas) { canvas.width = 0; canvas.height = 0 }
+              if (tl) tl.innerHTML = ''
+            }
+            renderedRef.current.delete(i)
+            pageCacheRef.current.delete(i)
+            setRenderedH((prev) => {
+              if (!(i in prev)) return prev
+              const nx = { ...prev }
+              delete nx[i]
+              return nx
+            })
+          }
+        }
+      }
     }
     setSelBtn(null)
     setBubble(null)
@@ -507,7 +544,7 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
                 key={i}
                 className="dshz-pdf-page"
                 data-page={i}
-                style={{ width: `${w}px`, height: `${Math.round(pageH)}px` }}
+                style={{ width: `${w}px`, height: `${Math.round(renderedH[i] ?? pageH)}px` }}
                 ref={(el) => {
                   if (el) pageElsRef.current.set(i, el)
                   else pageElsRef.current.delete(i)
