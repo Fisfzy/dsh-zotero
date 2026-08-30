@@ -84,16 +84,15 @@ export function FullTranslatePanel(props: { itemKey: string; attachmentKey: stri
       <div className="dshz-ft-head">
         <div className="row1">
           <button className="dshz-btn" onClick={props.onBack}>← PDF</button>
-          <span className="ttl">{job?.title || '全文翻译 · pdf2zh'}</span>
           <span className="pg">{running ? (pageTotal > 0 ? `翻译中 ${pageNo}/${pageTotal} 页` : '正在翻译…') : done ? '✅ 已生成' : ''}</span>
           {running ? (
             <button className="dshz-btn" onClick={() => void pdf2zhCancel(props.attachmentKey)}>取消</button>
           ) : null}
           {done ? (
-            <>
-              <a className="dshz-btn primary" href={pdf2zhFileUrl(props.attachmentKey)} download>下载双语 PDF</a>
-              <a className="dshz-btn" href={`${API}/pdf2zh/file?attachmentKey=${encodeURIComponent(props.attachmentKey)}&type=mono`} download>下载译文版</a>
-            </>
+            <a className="dshz-btn primary" href={pdf2zhFileUrl(props.attachmentKey)} download>下载双语 PDF</a>
+          ) : null}
+          {done ? (
+            <a className="dshz-btn" href={`${API}/pdf2zh/file?attachmentKey=${encodeURIComponent(props.attachmentKey)}&type=mono`} download>下载译文版</a>
           ) : null}
           {done ? (
             <div className="dshz-seg">
@@ -480,24 +479,26 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
   }
   return (
     <div className="dshz-pdf-reader" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-      {/* 阅读器工具条 */}
-      <div className="dshz-pdf-toolbar">
-        <button className="dshz-btn" onClick={() => goPage(Math.max(1, current - 1))} disabled={numPages === 0 || current <= 1} title="上一页">‹</button>
-        <span className="pg">{numPages ? `${current} / ${numPages}` : '…'}</span>
-        <button className="dshz-btn" onClick={() => goPage(Math.min(numPages, current + 1))} disabled={numPages === 0 || current >= numPages} title="下一页">›</button>
-        <button className="dshz-btn" onClick={() => zoom(-0.1)} disabled={numPages === 0} title="缩小">−</button>
-        <span className="pg">{Math.round(factor * 100)}%</span>
-        <button className="dshz-btn" onClick={() => zoom(0.1)} disabled={numPages === 0} title="放大">+</button>
-        <span style={{ flex: 1 }} />
-        <button
-          className="dshz-btn primary"
-          title={hasOutput ? '查看该论文的中英对照（已有译文）' : '一键翻译全文（生成中英对照）'}
-          disabled={!itemKey}
-          onClick={() => setFtView(true)}
-        >{hasOutput ? '📄 双语阅读' : '📄 全文翻译'}</button>
-        <button className="dshz-btn" title="下载原 PDF（在浏览器中打开）" onClick={() => { window.open(`${API}/pdf?key=${encodeURIComponent(attachmentKey)}`, '_blank') }}>⬇ 原 PDF</button>
-        <button className="dshz-btn" title="在 Zotero 阅读器打开" onClick={() => { void fetch(`${API}/open?key=${encodeURIComponent(attachmentKey)}&target=zotero`).catch(() => {}) }}>Zotero</button>
-      </div>
+      {/* 阅读器工具条（进入翻译面板后隐藏——按钮合并进翻译栏，避免双栏冗余） */}
+      {!ftView ? (
+        <div className="dshz-pdf-toolbar">
+          <button className="dshz-btn" onClick={() => goPage(Math.max(1, current - 1))} disabled={numPages === 0 || current <= 1} title="上一页">‹</button>
+          <span className="pg">{numPages ? `${current} / ${numPages}` : '…'}</span>
+          <button className="dshz-btn" onClick={() => goPage(Math.min(numPages, current + 1))} disabled={numPages === 0 || current >= numPages} title="下一页">›</button>
+          <button className="dshz-btn" onClick={() => zoom(-0.1)} disabled={numPages === 0} title="缩小">−</button>
+          <span className="pg">{Math.round(factor * 100)}%</span>
+          <button className="dshz-btn" onClick={() => zoom(0.1)} disabled={numPages === 0} title="放大">+</button>
+          <span style={{ flex: 1 }} />
+          <button
+            className="dshz-btn primary"
+            title={hasOutput ? '查看该论文的中英对照（已有译文）' : '一键翻译全文（生成中英对照）'}
+            disabled={!itemKey}
+            onClick={() => setFtView(true)}
+          >{hasOutput ? '📄 双语阅读' : '📄 全文翻译'}</button>
+          <button className="dshz-btn" title="下载原 PDF（在浏览器中打开）" onClick={() => { window.open(`${API}/pdf?key=${encodeURIComponent(attachmentKey)}`, '_blank') }}>⬇ 原 PDF</button>
+          <button className="dshz-btn" title="在 Zotero 阅读器打开" onClick={() => { void fetch(`${API}/open?key=${encodeURIComponent(attachmentKey)}&target=zotero`).catch(() => {}) }}>Zotero</button>
+        </div>
+      ) : null}
       {/* 划词翻译浮钮 */}
       {selBtn && !translating && !bubble?.text && !bubble?.error ? (
         <button className="dshz-sel" style={{ left: selBtn.x, top: selBtn.y }} onClick={() => void doTranslate()}>
