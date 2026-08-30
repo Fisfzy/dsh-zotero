@@ -485,12 +485,13 @@ export class ZoteroClient {
   }
 
   private buildItemsPath(path: string, params: Record<string, string | number | undefined>): string {
-    const qs = new URLSearchParams()
-    qs.set('format', 'json')
+    // 手工 encodeURIComponent（避免 URLSearchParams 的 `+`/大小写差异——Zotero 本地 API
+    // 对中文 query 有解析兼容问题；显式百分号编码最稳）。
+    const parts: string[] = ['format=json']
     for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== '') qs.set(k, String(v))
+      if (v !== undefined && v !== '') parts.push(`${k}=${encodeURIComponent(String(v))}`)
     }
-    return `${path}/items?${qs.toString()}`
+    return `${path}/items?${parts.join('&')}`
   }
 
   /** Search items across the library (metadata + optional fulltext). */

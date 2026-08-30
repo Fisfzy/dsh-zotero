@@ -58,6 +58,7 @@ const itemSummarySchema = {
           creatorType: { type: 'string', required: true },
           firstName: { type: 'string', required: true },
           lastName: { type: 'string', required: true },
+          name: { type: 'string' },
           fullName: { type: 'string', required: true },
         },
       },

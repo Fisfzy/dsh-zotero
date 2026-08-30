@@ -151,50 +151,13 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
     }
   }
 
-  async function readItem(key: string): Promise<void> {
-    setBusy('解析全文（首次较慢，之后走缓存）…')
-    const r = await apiGet(`/read?itemKey=${encodeURIComponent(key)}`)
-    setBusy('')
-    if (r.status === 'ok') {
-      setNote(`✅ 已解析：${r.source} · ${r.textChars} 字符`)
-    } else {
-      setNote(`⚠️ ${r.error ?? '解析失败'}`)
-    }
-    apiGet('/artifacts').then((x) => setArtifacts(x.artifacts ?? [])).catch(() => {})
-  }
-
-  async function summarizeItem(key: string): Promise<void> {
-    setBusy('生成概述（默认模型，约 30–90s）…')
-    const r = await apiGet(`/summarize?itemKey=${encodeURIComponent(key)}&mode=overview`)
-    setBusy('')
-    if (r.status === 'ok') {
-      setDetail((d: any) => ({ ...d, summary: r.summary }))
-    } else {
-      setNote(`⚠️ ${r.error ?? '概述生成失败'}`)
-    }
-    apiGet('/artifacts').then((x) => setArtifacts(x.artifacts ?? [])).catch(() => {})
-  }
-
-  /** 开读/送入 → 文献聊天（M3.2 rev2：独立会话，不碰主对话）。
+  /** 文献 CHAT → 文献聊天（M3.2：独立会话，不碰主对话）。
    *  只 dispatch 事件（带 parent+cwd）；host 调用由 ChatWindow.openPaper 统一发起。 */
   async function openReadChat(key: string, title: string, sendRead: boolean): Promise<void> {
     dispatchChatOpen({ target: 'paper', itemKey: key, title, sendRead, parent: sessionId, cwd: currentCwd(sessionId) })
     setNote(sendRead
       ? `🚀 已唤起文献 Chat 并开始精读《${title.slice(0, 30)}…》（浮窗右上可拖拽/最小化）`
       : `✅ 已送入文献 Chat，去浮窗里追问吧。`)
-  }
-
-  async function openPdf(attachmentKey: string, target: 'zotero' | 'system' = 'zotero'): Promise<void> {
-    setBusy(target === 'zotero' ? '唤起 Zotero 阅读器…' : '系统打开 PDF…')
-    const r = await apiGet(`/open?key=${encodeURIComponent(attachmentKey)}&target=${target}`)
-    setBusy('')
-    if (r.ok) {
-      setNote(target === 'zotero'
-        ? '📖 已在 Zotero 内置阅读器打开（侧边栏注释/文本选择可用）。'
-        : `📄 已用系统默认程序打开：${r.path ?? ''}`)
-    } else {
-      setNote(`⚠️ ${r.error ?? '打开失败'}`)
-    }
   }
 
   async function saveConfig(): Promise<void> {
@@ -269,15 +232,11 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                 <div className="dshz-row" style={{ cursor: 'default', background: '#1e232a', marginTop: 0 }}>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     <button className="dshz-btn" onClick={() => setReading(null)}>← 列表</button>
-                    <span className="dshz-note" style={{ flex: 1, minWidth: 120, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dshz-fg)', fontSize: 12 }}>
+                    <span className="dshz-note" style={{ flex: 1, minWidth: 120, maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dshz-fg)', fontSize: 12 }}>
                       {reading.title || 'PDF'}
                     </span>
-                    <button className="dshz-btn primary" onClick={() => void openReadChat(reading.key, reading.title, true)}>开读 · 唤起Chat</button>
-                    <button className="dshz-btn" onClick={() => void openReadChat(reading.key, reading.title, false)}>送入文献 Chat</button>
-                    <button className="dshz-btn" onClick={() => void summarizeItem(reading.key)}>概述</button>
-                    <button className="dshz-btn" onClick={() => void readItem(reading.key)}>读全文</button>
-                    <button className="dshz-btn" onClick={() => void openPdf(reading.attachmentKey, 'zotero')}>Zotero 阅读器</button>
-                    <button className="dshz-btn" onClick={() => void openPdf(reading.attachmentKey, 'system')}>系统打开</button>
+                    <button className="dshz-btn primary" onClick={() => void openReadChat(reading.key, reading.title, true)}>📄 文献 CHAT</button>
+                    <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
                   </div>
                   {detail?.item && (
                     <div className="dshz-kv" style={{ marginTop: 6 }}>
@@ -362,10 +321,8 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                           ) : null}
                         </div>
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          <button className="dshz-btn primary" onClick={() => void openReadChat(String(detailItem.key), String(detailItem.title ?? ''), true)}>开读 · 唤起Chat</button>
-                          <button className="dshz-btn" onClick={() => void openReadChat(String(detailItem.key), String(detailItem.title ?? ''), false)}>送入文献 Chat</button>
-                          <button className="dshz-btn" onClick={() => void readItem(detailItem.key)}>读全文</button>
-                          <button className="dshz-btn" onClick={() => void summarizeItem(detailItem.key)}>概述</button>
+                          <button className="dshz-btn primary" onClick={() => void openReadChat(String(detailItem.key), String(detailItem.title ?? ''), true)}>📄 文献 CHAT</button>
+                          <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
                         </div>
                         {detailItem.attachments?.length ? (
                           <div className="dshz-note" style={{ marginTop: 8 }}>
