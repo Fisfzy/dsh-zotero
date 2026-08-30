@@ -210,7 +210,15 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
         <span className="dot" style={{ background: dot }} />
         <b>Zotero</b>
         <span className="st" title={statusText}>{statusText}</span>
-        <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>🧠 文献 Chat</button>
+        <button
+          className="dshz-btn primary"
+          onClick={() => {
+            if (reading) void openReadChat(reading.key, reading.title)
+            else if (detailItem?.key) void openReadChat(String(detailItem.key), String(detailItem.title ?? ''))
+            else setNote('⚠️ 请先选中一篇论文（点开条目进入阅读），或直接使用「文献库 CHAT」。')
+          }}
+        >📄 文献 CHAT</button>
+        <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
         <button className="dshz-btn" onClick={() => void loadBasics()}>刷新</button>
       </div>
       <div className="dshz-tabs">
