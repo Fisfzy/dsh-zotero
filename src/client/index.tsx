@@ -151,13 +151,10 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
     }
   }
 
-  /** 文献 CHAT → 文献聊天（M3.2：独立会话，不碰主对话）。
-   *  只 dispatch 事件（带 parent+cwd）；host 调用由 ChatWindow.openPaper 统一发起。 */
-  async function openReadChat(key: string, title: string, sendRead: boolean): Promise<void> {
-    dispatchChatOpen({ target: 'paper', itemKey: key, title, sendRead, parent: sessionId, cwd: currentCwd(sessionId) })
-    setNote(sendRead
-      ? `🚀 已唤起文献 Chat 并开始精读《${title.slice(0, 30)}…》（浮窗右上可拖拽/最小化）`
-      : `✅ 已送入文献 Chat，去浮窗里追问吧。`)
+  /** 文献 CHAT → 文献聊天（M3.2：独立会话，不碰主对话；点开只注入全文，不自动发精读指令）。 */
+  async function openReadChat(key: string, title: string): Promise<void> {
+    dispatchChatOpen({ target: 'paper', itemKey: key, title, parent: sessionId, cwd: currentCwd(sessionId) })
+    setNote(`💬 已打开《${title.slice(0, 30)}…》的文献 Chat（全文已注入）——在浮窗里点快捷操作或直接提问即可。`)
   }
 
   async function saveConfig(): Promise<void> {
@@ -235,7 +232,7 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                     <span className="dshz-note" style={{ flex: 1, minWidth: 120, maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dshz-fg)', fontSize: 12 }}>
                       {reading.title || 'PDF'}
                     </span>
-                    <button className="dshz-btn primary" onClick={() => void openReadChat(reading.key, reading.title, true)}>📄 文献 CHAT</button>
+                    <button className="dshz-btn primary" onClick={() => void openReadChat(reading.key, reading.title)}>📄 文献 CHAT</button>
                     <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
                   </div>
                   {detail?.item && (
@@ -321,7 +318,7 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                           ) : null}
                         </div>
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          <button className="dshz-btn primary" onClick={() => void openReadChat(String(detailItem.key), String(detailItem.title ?? ''), true)}>📄 文献 CHAT</button>
+                          <button className="dshz-btn primary" onClick={() => void openReadChat(String(detailItem.key), String(detailItem.title ?? ''))}>📄 文献 CHAT</button>
                           <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
                         </div>
                         {detailItem.attachments?.length ? (
