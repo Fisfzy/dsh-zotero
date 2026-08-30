@@ -47,6 +47,16 @@ export interface Config {
   summaryPrompt: string
   /** Override for the translation prompt (empty = shipped default). */
   translatePrompt: string
+  /** 划词阅读即时翻译默认目标语言（如 zh / en，设置页可改）。 */
+  translateTargetLang: string
+  /** 一键全文翻译引擎：pdf2zh（官方 CLI）。Base URL（OpenAI 兼容，如 DeepSeek）。 */
+  pdf2zhBaseUrl: string
+  /** pdf2zh 用的 LLM API Key（敏感；留空 = 未启用一键全文翻译）。 */
+  pdf2zhApiKey: string
+  /** pdf2zh 用的模型名。 */
+  pdf2zhModel: string
+  /** pdf2zh 翻译线程数（并行请求）。 */
+  pdf2zhThreads: number
   /** Library-level RAG (M4; keep off until the index pipeline is enabled). */
   ragEnabled: boolean
   /** Cache directory for MinerU outputs and RAG index (empty = DSH_HOME/data/dsh-zotero/cache). */
@@ -73,6 +83,11 @@ export const Config = z.object({
   chatWithPdfPrompt: z.string().default(''),
   summaryPrompt: z.string().default(''),
   translatePrompt: z.string().default(''),
+  translateTargetLang: z.string().default('zh'),
+  pdf2zhBaseUrl: z.string().default('https://api.deepseek.com/v1'),
+  pdf2zhApiKey: z.string().default(''),
+  pdf2zhModel: z.string().default('deepseek-chat'),
+  pdf2zhThreads: z.number().min(1).max(16).default(4),
   ragEnabled: z.boolean().default(false),
   cacheDir: z.string().default(''),
 })

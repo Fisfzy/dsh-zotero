@@ -5,11 +5,12 @@
  * · 产出物区 · 设置（MinerU 等，settings.json 热生效）。
  * 「开读」与「送入」都走 /inject-context & /start-read（host agent.inject/followup）。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { SlotsService } from '@deepseek-ai/dsh-client-ui-slots'
 import { CSS } from './theme'
 import { ChatWindow, dispatchChatOpen } from './ChatWindow'
+import { PdfReader } from './PdfReader'
 
 /** ClientContext 需要的最小签名（sessions.create/list 见 dsh-api-session-controller/client）。 */
 type ClientContext = {
@@ -39,6 +40,10 @@ function currentCwd(sessionId: string): string {
 }
 
 const API = '/@dsh-external/dsh-zotero/api'
+/** 设置分组展开状态的 localStorage key。 */
+const CFG_OPEN_KEY = 'dshz-cfg-open'
+/** 构建标识（每轮改版递增；设置页可见，帮助识别浏览器是否加载新 bundle）。 */
+export const BUILD_TAG = 'b18-select-fixed-fix'
 
 async function apiGet(path: string): Promise<any> {
   return (await fetch(`${API}${path}`)).json()
@@ -57,6 +62,33 @@ interface TreeNode { key: string; name: string; depth: number; itemCount?: numbe
 interface RecentItem { key: string; title: string; itemType: string; year?: number }
 interface Artifact { type: string; title: string; payload: string; at: string }
 
+/** 设置折叠分组：0fr↔1fr 平滑开合（无测高、无抖动）；chevron 旋转由 .open 控制。 */
+function Sec(props: { label: string; open: boolean; onToggle: () => void; children: ReactNode }): JSX.Element {
+  return (
+    <div className={`dshz-sec-card ${props.open ? 'open' : ''}`}>
+      <div
+        className="dshz-sec-head"
+        role="button"
+        tabIndex={0}
+        onClick={props.onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            props.onToggle()
+          }
+        }}
+      >
+        <span className="chev">▸</span>
+        <span className="lbl">{props.label}</span>
+        <span className="hint">{props.open ? '收起' : '展开'}</span>
+      </div>
+      <div className="dshz-sec-body">
+        <div className="inner">{props.children}</div>
+      </div>
+    </div>
+  )
+}
+
 export function ZoteroPanel(props: { sessionId?: string } & Record<string, unknown>): JSX.Element {
   const [sessionId, setSessionId] = useState<string>(String(props.sessionId ?? ''))
   const [status, setStatus] = useState<Record<string, unknown> | null>(null)
@@ -73,6 +105,14 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
   const [note, setNote] = useState('')
   /** 阅读模式：{论文 key, 标题, PDF 附件 key}；非空时面板主体 = PDF 阅读器。 */
   const [reading, setReading] = useState<{ key: string; title: string; attachmentKey: string } | null>(null)
+  /** 设置分组展开状态（localStorage 持久化）。 */
+  const [openSec, setOpenSec] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem(CFG_OPEN_KEY)
+      if (raw) return { conn: true, ...JSON.parse(raw) }
+    } catch { /* best-effort */ }
+    return { conn: true, mineru: false, pdf2zh: false, read: false }
+  })
   const sessionRef = useRef(props.sessionId)
   useEffect(() => {
     if (props.sessionId && props.sessionId !== sessionRef.current) {
@@ -80,6 +120,20 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
       setSessionId(String(props.sessionId))
     }
   }, [props.sessionId])
+
+  /** 设置分组开合（同步 localStorage）。 */
+  function toggleSec(id: string): void {
+    setOpenSec((s) => {
+      const next = { ...s, [id]: !s[id] }
+      try { localStorage.setItem(CFG_OPEN_KEY, JSON.stringify(next)) } catch { /* best-effort */ }
+      return next
+    })
+  }
+  function setAllSec(open: boolean): void {
+    const next = { conn: open, mineru: open, pdf2zh: open, read: open }
+    try { localStorage.setItem(CFG_OPEN_KEY, JSON.stringify(next)) } catch { /* best-effort */ }
+    setOpenSec(next)
+  }
 
   async function loadBasics(): Promise<void> {
     setBusy('连接检测…')
@@ -164,7 +218,7 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
       if (String(v) === String(config[k] ?? '')) continue
       if (v === '') {
         // 秘钥留空=不改（沿用）；其它字段允许清空。
-        if (['localApiKey', 'webApiKey', 'mineruCloudApiKey'].includes(k)) continue
+        if (['localApiKey', 'webApiKey', 'mineruCloudApiKey', 'pdf2zhApiKey'].includes(k)) continue
       }
       patch[k] = v
     }
@@ -227,21 +281,25 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
         <div className={`dshz-tab ${tab === 'cfg' ? 'on' : ''}`} onClick={() => setTab('cfg')}>设置</div>
       </div>
       <div className="dshz-b">
-        {busy ? <div className="dshz-banner ok">⏳ {busy}</div> : null}
-        {note ? <div className="dshz-banner ok">{note}</div> : null}
+        <div key={tab} className="dshz-fade">
+        {busy ? <div className="dshz-banner ok"><span className="dshz-spin" />{busy}</div> : null}
+        {note ? (
+          <div className="dshz-banner ok">
+            <span style={{ minWidth: 0, overflow: 'hidden' }}>{note}</span>
+            <button className="dshz-banner-x" onClick={() => setNote('')} title="关闭">×</button>
+          </div>
+        ) : null}
         {tab === 'lib' && (
           <>
             {reading ? (
-              /* ── 阅读模式：面板主体 = PDF 阅读器 ── */
-              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 480 }}>
+              /* ── 阅读模式：absolute 填满（脱离流，超高内容不撑破 host 容器） ── */
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                 <div className="dshz-row" style={{ cursor: 'default', background: '#1e232a', marginTop: 0 }}>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     <button className="dshz-btn" onClick={() => setReading(null)}>← 列表</button>
-                    <span className="dshz-note" style={{ flex: 1, minWidth: 120, maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dshz-fg)', fontSize: 12 }}>
+                    <span className="dshz-note" style={{ flex: 1, minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dshz-fg)', fontSize: 12 }}>
                       {reading.title || 'PDF'}
                     </span>
-                    <button className="dshz-btn primary" onClick={() => void openReadChat(reading.key, reading.title)}>📄 文献 CHAT</button>
-                    <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
                   </div>
                   {detail?.item && (
                     <div className="dshz-kv" style={{ marginTop: 6 }}>
@@ -252,11 +310,9 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                     </div>
                   )}
                 </div>
-                <iframe
-                  title={reading.title || 'PDF'}
-                  src={`${API}/pdf?key=${encodeURIComponent(reading.attachmentKey)}`}
-                  style={{ flex: 1, width: '100%', border: '1px solid var(--dshz-line)', borderRadius: 8, background: '#111' }}
-                />
+                <div className="dshz-pdf-wrap">
+                  <PdfReader attachmentKey={reading.attachmentKey} itemKey={reading.key} />
+                </div>
               </div>
             ) : (
               <>
@@ -326,25 +382,23 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                           ) : null}
                         </div>
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          <button className="dshz-btn primary" onClick={() => void openReadChat(String(detailItem.key), String(detailItem.title ?? ''))}>📄 文献 CHAT</button>
-                          <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
+                          {detailItem.attachments?.length ? (
+                            <div className="dshz-note" style={{ marginTop: 8 }}>
+                              附件 {detailItem.attachments.length}：
+                              {detailItem.attachments.map((a: any) => (
+                                <span
+                                  key={a.key}
+                                  className={`dshz-badge ${a.isPdf ? 'pdf' : ''}`}
+                                  style={a.isPdf ? { cursor: 'pointer' } : undefined}
+                                  title={a.isPdf ? '面板内预览' : undefined}
+                                  onClick={a.isPdf ? () => setReading({ key: detailItem.key, title: detailItem.title || '', attachmentKey: a.key }) : undefined}
+                                >
+                                  {String(a.title ?? '').slice(0, 26)}{a.isPdf ? ' · PDF▶' : ''}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
-                        {detailItem.attachments?.length ? (
-                          <div className="dshz-note" style={{ marginTop: 8 }}>
-                            附件 {detailItem.attachments.length}：
-                            {detailItem.attachments.map((a: any) => (
-                              <span
-                                key={a.key}
-                                className={`dshz-badge ${a.isPdf ? 'pdf' : ''}`}
-                                style={a.isPdf ? { cursor: 'pointer' } : undefined}
-                                title={a.isPdf ? '面板内预览' : undefined}
-                                onClick={a.isPdf ? () => setReading({ key: detailItem.key, title: detailItem.title || '', attachmentKey: a.key }) : undefined}
-                              >
-                                {String(a.title ?? '').slice(0, 26)}{a.isPdf ? ' · PDF▶' : ''}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
                         {detail.summary ? (
                           <div className="dshz-note" style={{ marginTop: 8, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
                             {detail.summary}
@@ -388,15 +442,21 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
           <>
             <div className="dshz-note" style={{ marginBottom: 6 }}>
               保存即热生效（写入 <code>settings.json</code>，重启/重载后依然保留；秘钥留空 = 不改）。
+              分组可折叠，展开状态自动记住。 <span style={{ opacity: 0.7 }}>· build {BUILD_TAG}</span>
             </div>
-            <div className="dshz-sec">Zotero 连接</div>
+            <div className="dshz-sec-tools">
+              <button onClick={() => setAllSec(true)}>全部展开</button>
+              <button onClick={() => setAllSec(false)}>全部收起</button>
+            </div>
+            <Sec label="Zotero 连接" open={!!openSec.conn} onToggle={() => toggleSec('conn')}>
             {field('localApiPort', '本地 API 端口（Zotero httpServer，默认 23119）', 'number')}
             {field('localApiKey', '本地 API Key（开启密钥认证时填写）', 'password')}
             {field('webUserId', 'Web API userId（桌面关闭时降级，可留空）')}
             {field('webApiKey', 'Web API Key', 'password')}
             {field('storageDir', '存储目录（可选，PDF 直读兜底）')}
             {field('searchLimit', '检索默认条数', 'number')}
-            <div className="dshz-sec">MinerU 解析</div>
+            </Sec>
+            <Sec label="MinerU 解析" open={!!openSec.mineru} onToggle={() => toggleSec('mineru')}>
             <div className="dshz-field">
               <label>后端模式</label>
               <select className="dshz-sel" value={form.mineruMode ?? 'local'} onChange={(e) => setForm((f) => ({ ...f, mineruMode: e.target.value }))}>
@@ -428,8 +488,20 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
               </label>
             </div>
             {field('mineruMaxAutoPages', '自动解析页数上限（daemon/后台）', 'number')}
-            <div className="dshz-sec">精读</div>
+            </Sec>
+            <Sec label="PDF2ZH 翻译引擎（一键全文）" open={!!openSec.pdf2zh} onToggle={() => toggleSec('pdf2zh')}>
+              <div className="dshz-note" style={{ marginBottom: 8 }}>
+                一键「全文翻译」调用 pdf2zh 官方 CLI（uv tool install --python 3.12 pdf2zh），
+                产出双语 PDF（原文+译文同页）。翻译使用 OpenAI 兼容接口（如 DeepSeek：https://api.deepseek.com/v1）。
+              </div>
+              {field('pdf2zhBaseUrl', 'OpenAI 兼容 Base URL')}
+              {field('pdf2zhApiKey', 'LLM API Key（如 DeepSeek）', 'password')}
+              {field('pdf2zhModel', '模型名（如 deepseek-chat）')}
+              {field('pdf2zhThreads', '翻译线程数', 'number')}
+            </Sec>
+            <Sec label="精读" open={!!openSec.read} onToggle={() => toggleSec('read')}>
             {field('fullTextTokenBudget', '单次全文 token 预算', 'number')}
+            {field('translateTargetLang', '划词翻译目标语言（如 zh / en）')}
             {field('cacheDir', '缓存目录（留空=默认）')}
             <div className="dshz-field">
               <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -449,9 +521,11 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
               <label>开读/精读指引 prompt 覆盖（注入式）</label>
               <textarea className="dshz-input" rows={3} value={form.chatWithPdfPrompt ?? ''} onChange={(e) => setForm((f) => ({ ...f, chatWithPdfPrompt: e.target.value }))} />
             </div>
+            </Sec>
             <button className="dshz-btn primary" style={{ marginTop: 4 }} onClick={() => void saveConfig()}>保存设置（热生效）</button>
           </>
         )}
+        </div>
       </div>
     </div>
   )

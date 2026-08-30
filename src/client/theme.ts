@@ -61,6 +61,7 @@ export const CSS = `
   padding:11px 13px;border-radius:14px;margin-bottom:9px;
   background:var(--ios-card);cursor:pointer;
   transition:background .15s ease,transform .12s ease;
+  animation:dshz-rowin .2s ease both;
 }
 .dshz-row:hover{background:var(--ios-card2)}
 .dshz-row:active{transform:scale(.985)}
@@ -96,6 +97,7 @@ export const CSS = `
 .dshz-banner{
   border-radius:12px;padding:8px 12px;font-size:12.5px;margin-bottom:10px;
   display:flex;align-items:flex-start;gap:8px;
+  animation:dshz-fadein .16s ease both;
 }
 .dshz-banner.err{background:rgba(255,69,58,.14);color:#FF8B84}
 .dshz-banner.ok{background:rgba(48,209,88,.13);color:#6BDD8B}
@@ -118,6 +120,7 @@ export const CSS = `
   border:1px solid rgba(255,255,255,.08);border-radius:20px;
   box-shadow:0 24px 70px rgba(0,0,0,.55),0 8px 24px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.06);
   overflow:hidden;font-size:13px;color:var(--ios-fg);
+  animation:dshz-pop-in .18s ease both;
 }
 .dshz-win[data-hidden="1"]{display:none}
 .dshz-win-head{
@@ -246,4 +249,190 @@ export const CSS = `
 .dshz-welcome{padding:28px 20px;text-align:center}
 .dshz-welcome h2{font-size:18px;font-weight:700;color:var(--ios-fg);margin:0 0 8px;letter-spacing:-.2px}
 .dshz-welcome p{font-size:12.5px;color:var(--ios-dim);line-height:1.8;margin:5px 0}
+
+/* ── 通用动效（短、轻、iOS 节奏） ── */
+@keyframes dshz-fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@keyframes dshz-rowin{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+@keyframes dshz-pop-in{from{opacity:0;transform:scale(.965) translateY(6px)}to{opacity:1;transform:none}}
+@keyframes dshz-spin{to{transform:rotate(360deg)}}
+.dshz-fade{
+  animation:dshz-fadein .18s ease both;
+  /* 撑满内容区：阅读模式（height:100% 链）依赖确定高度；relative 供阅读层 absolute 定位 */
+  display:flex;flex-direction:column;height:100%;min-height:0;position:relative;
+}
+.dshz-spin{
+  width:13px;height:13px;border-radius:50%;flex:none;margin-top:1px;
+  border:2px solid rgba(255,255,255,.22);border-top-color:currentColor;
+  animation:dshz-spin .7s linear infinite;
+}
+
+/* banner 关闭按钮 */
+.dshz-banner-x{
+  margin-left:auto;border:0;background:transparent;color:inherit;opacity:.55;
+  cursor:pointer;font-size:15px;line-height:1;padding:0 2px;font-family:inherit;
+  transition:opacity .12s ease;
+}
+.dshz-banner-x:hover{opacity:1}
+
+/* PDF 阅读载入态 */
+.dshz-pdf-wrap{position:relative;flex:1;min-height:0;display:flex;border:1px solid var(--ios-sep);border-radius:12px;background:var(--ios-bg);overflow:hidden}
+.dshz-pdf-wrap iframe{flex:1;width:100%;border:0;background:#111}
+.dshz-pdf-loading{
+  position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;gap:10px;
+  align-items:center;justify-content:center;background:rgba(0,0,0,.55);
+  backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
+  animation:dshz-fadein .15s ease both;
+}
+.dshz-pdf-loading .t{color:var(--ios-dim);font-size:12px}
+
+/* ── 设置折叠分组（iOS inset card + 平滑开合动画） ── */
+.dshz-sec-card{
+  border:1px solid var(--ios-sep);border-radius:14px;background:var(--ios-card);
+  margin-bottom:10px;overflow:hidden;
+}
+.dshz-sec-head{
+  display:flex;align-items:center;gap:8px;padding:10px 13px;cursor:pointer;user-select:none;
+  color:var(--ios-fg);font-size:13px;font-weight:600;
+  transition:background .15s ease;
+}
+.dshz-sec-head:hover{background:rgba(255,255,255,.05)}
+.dshz-sec-head:active{background:rgba(255,255,255,.08)}
+.dshz-sec-head .chev{
+  flex:none;width:12px;text-align:center;font-size:10px;color:var(--ios-dim);
+  transition:transform .2s cubic-bezier(.4,0,.2,1);
+}
+.dshz-sec-card.open .dshz-sec-head .chev{transform:rotate(90deg)}
+.dshz-sec-head .lbl{flex:1}
+.dshz-sec-head .hint{
+  font-size:11px;color:var(--ios-dim2);font-weight:400;
+  opacity:0;transition:opacity .15s ease;
+}
+.dshz-sec-head:hover .hint{opacity:1}
+/* 0fr→1fr：无需 JS 测高、无抖动 */
+.dshz-sec-body{display:grid;grid-template-rows:0fr;transition:grid-template-rows .24s cubic-bezier(.4,0,.2,1)}
+.dshz-sec-card.open .dshz-sec-body{grid-template-rows:1fr}
+.dshz-sec-body .inner{
+  min-height:0;overflow:hidden;padding:0 13px;
+  transition:padding .24s cubic-bezier(.4,0,.2,1);
+}
+.dshz-sec-card.open .dshz-sec-body .inner{padding:4px 13px 12px}
+.dshz-sec-tools{display:flex;gap:12px;justify-content:flex-end;margin:2px 2px 10px}
+.dshz-sec-tools button{
+  border:0;background:transparent;color:var(--ios-dim);font-size:11.5px;
+  cursor:pointer;padding:2px 4px;font-family:inherit;transition:color .12s ease;
+}
+.dshz-sec-tools button:hover{color:var(--ios-fg)}
+
+/* ── PdfReader（pdf.js 自渲染阅读器） ── */
+.dshz-pdf-toolbar{
+  display:flex;gap:6px;align-items:center;padding:6px 10px;flex-wrap:wrap;
+  border-bottom:1px solid var(--ios-sep);background:rgba(28,28,30,.6);
+}
+.dshz-pdf-toolbar .pg{color:var(--ios-dim);font-size:12px;min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+.dshz-pdf-scroll{
+  flex:1;min-height:0;overflow:auto;position:relative;
+  background:var(--ios-bg);padding:14px;scroll-behavior:auto;
+}
+.dshz-pdf-page{
+  position:relative;margin:0 auto;border-radius:8px;overflow:hidden;
+  border:1px solid var(--ios-sep);background:#fff;
+  transition:width .12s ease,height .12s ease;
+}
+.dshz-pdf-page{ margin-bottom:14px }
+.dshz-pdf-page canvas{position:absolute;inset:0;display:block}
+.dshz-pdf-page .tl{
+  position:absolute;inset:0;overflow:hidden;opacity:.25;line-height:1;
+  text-size-adjust:none;transform-origin:0 0;z-index:2;caret-color:transparent;
+}
+.dshz-pdf-page .tl span,.dshz-pdf-page .tl br{
+  color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0% 0%;
+}
+.dshz-sel{
+  position:fixed;z-index:40;transform:translate(-50%,-100%);
+  background:var(--ios-blue);color:#fff;border:0;border-radius:999px;
+  padding:6px 15px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;
+  box-shadow:0 6px 18px rgba(0,0,0,.5);
+  animation:dshz-pop-in .14s ease both;
+}
+.dshz-sel:hover{background:#3D9BFF}
+.dshz-bubble{
+  position:fixed;z-index:41;width:min(440px,92vw);max-height:60vh;overflow:auto;
+  background:rgba(44,44,46,.95);backdrop-filter:blur(20px) saturate(1.5);-webkit-backdrop-filter:blur(20px) saturate(1.5);
+  border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:10px 12px;
+  box-shadow:0 12px 40px rgba(0,0,0,.55);
+  font-size:13px;line-height:1.65;color:var(--ios-fg);white-space:pre-wrap;
+  animation:dshz-pop-in .16s ease both;
+  transform:translateX(-50%);
+}
+.dshz-bubble .bar{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+.dshz-bubble .bar .lang{font-size:11px;color:var(--ios-dim);font-weight:600}
+.dshz-bubble .bar .dshz-btn{padding:2px 10px;font-size:11.5px;border-radius:8px}
+.dshz-bubble .txt{color:var(--ios-fg)}
+
+/* ── 全文翻译对照视图 ── */
+.dshz-ft{flex:1;min-height:0;display:flex;flex-direction:column}
+.dshz-ft-head{padding:8px 12px;border-bottom:1px solid var(--ios-sep);background:rgba(28,28,30,.6);display:flex;flex-direction:column;gap:7px}
+.dshz-ft-head .row1{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dshz-ft-head .ttl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ios-fg);font-size:12.5px;font-weight:600}
+.dshz-ft-head .pg{color:var(--ios-dim);font-size:12px;font-variant-numeric:tabular-nums}
+.dshz-ft-progress{height:4px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden}
+.dshz-ft-progress .fill{height:100%;background:var(--ios-blue);background-image:linear-gradient(45deg,rgba(255,255,255,.18) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.18) 50%,rgba(255,255,255,.18) 75%,transparent 75%);background-size:28px 28px;border-radius:4px;transition:width .4s ease}
+.dshz-ft-list{flex:1;min-height:0;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px}
+.dshz-ft-card{border:1px solid var(--ios-sep);border-radius:12px;background:var(--ios-card);padding:10px 12px;animation:dshz-rowin .18s ease both}
+.dshz-ft-card .src{color:var(--ios-dim);font-size:12.5px;line-height:1.6;white-space:pre-wrap}
+.dshz-ft-card .dst{margin-top:6px;color:var(--ios-fg);font-size:13px;line-height:1.7;white-space:pre-wrap}
+.dshz-ft-card.pending .dst{color:var(--ios-dim2)}
+.dshz-ft-body{flex:1;min-height:0;display:flex;flex-direction:column;background:var(--ios-bg)}
+a.dshz-btn{display:inline-flex;align-items:center;text-decoration:none;color:var(--ios-fg)}
+a.dshz-btn.primary{color:#fff}
+@keyframes dshz-stripe{0%{background-position:0 0}100%{background-position:28px 0}}
+
+/* ── DSH GUI 全局控件样式（蓝底/方角/!important）防御：面板内拉回 iOS 质感 ──
+   GUI 规则 body:not(.theme-endfield-round) button/select/input（0,1,1 + !important）。
+   [data-dshz-root] 锚点把 specificity 提到 (0,2,1) 必胜（面板根自持该属性）。 */
+.dshz[data-dshz-root] button{
+  background-color:transparent !important;
+  border:0 !important;
+  border-radius:12px !important;
+  color:inherit !important;
+}
+.dshz[data-dshz-root] button.dshz-btn{
+  background-color:var(--ios-card) !important;
+  color:var(--ios-fg) !important;
+  border:1px solid transparent !important;
+  font-weight:500 !important;
+}
+.dshz[data-dshz-root] button.dshz-btn.primary{background-color:var(--ios-blue) !important;color:#fff !important;font-weight:600 !important}
+.dshz[data-dshz-root] button.dshz-btn:hover{background-color:var(--ios-card2) !important}
+.dshz[data-dshz-root] button.dshz-btn.primary:hover{background-color:#3D9BFF !important}
+.dshz[data-dshz-root] button.dshz-btn:active{transform:scale(.96)}
+.dshz[data-dshz-root] button.dshz-btn:disabled{opacity:.4 !important;cursor:default !important}
+.dshz[data-dshz-root] .dshz-pills button.dshz-btn{border-radius:999px !important}
+.dshz[data-dshz-root] .dshz-inputwrap button.dshz-btn.primary{border-radius:999px !important}
+.dshz[data-dshz-root] .dshz-sec-tools button{border-radius:8px !important;background-color:transparent !important;color:var(--ios-dim) !important}
+.dshz[data-dshz-root] .dshz-sec-tools button:hover{color:var(--ios-fg) !important}
+.dshz[data-dshz-root] .dshz-banner-x{background-color:transparent !important}
+.dshz[data-dshz-root] .dshz-seg button{border-radius:7px !important}
+.dshz[data-dshz-root] .dshz-seg button.on{background-color:var(--ios-bg) !important;color:#fff !important}
+.dshz[data-dshz-root] input.dshz-input,.dshz[data-dshz-root] textarea.dshz-input{border-radius:12px !important}
+.dshz[data-dshz-root] .dshz-ft-card,.dshz[data-dshz-root] .dshz-row{border-radius:14px !important}
+.dshz[data-dshz-root] .dshz-sel,
+.dshz[data-dshz-root] .dshz-sel:hover,
+.dshz[data-dshz-root] .dshz-sel:focus,
+.dshz[data-dshz-root] .dshz-sel:active{
+  -webkit-appearance:none;appearance:none;
+  background-color:var(--ios-card) !important;
+  border:1px solid var(--ios-sep) !important;
+  border-radius:12px !important;
+  color:var(--ios-fg) !important;
+  /* GUI 全局样式把 select 置为 fixed 悬浮浮层：还原为文档流内控件 */
+  position:static !important;
+  top:auto !important;left:auto !important;right:auto !important;bottom:auto !important;
+  z-index:auto !important;
+  transform:none !important;
+  display:block !important;
+  width:100% !important;
+  max-width:none !important;
+}
+.dshz[data-dshz-root] .dshz-sel:focus{border-color:var(--ios-blue) !important;box-shadow:0 0 0 3px var(--ios-blue-dim) !important}
 `

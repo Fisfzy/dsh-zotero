@@ -19,6 +19,7 @@
  *   GET  /chat-messages     文献会话消息缓存（host session/event 订阅累积）
  */
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import type LlmService from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -27,6 +28,16 @@ import type { Config as ZoteroConfig } from './config.ts'
 import type { ResolvedModel } from './ml.ts'
 import { ensureParsed, runSummary } from './tools-m2.ts'
 import { resolveCacheDir } from './mineru/cache.ts'
+import { translateText } from './translate.ts'
+import {
+  cancelFullTranslate,
+  fullTranslateStatus,
+  pauseFullTranslate,
+  resumeFullTranslate,
+  setFullTranslateRuntime,
+  startFullTranslate,
+} from './fulltranslate.ts'
+import { cancelPdf2zh, findOutput, pdf2zhConfigured, startPdf2zh, statusPdf2zh } from './pdf2zh.ts'
 import { composeConfig, currentConfig, setActiveConfig, writeOverlay } from './runtime.ts'
 
 export const PLUGIN_ID = '@dsh-external/dsh-zotero'
@@ -38,7 +49,7 @@ const READ_PROMPT =
 const LIBRARY_MODE_PROMPT =
   '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_read_fulltext（读取缓存全文——先免参调用拿 sections 章节偏移，再按 offset/limit 分段精读）或 zotero_read_pdf（预览）/ zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字）。一次不要读取超过 2 篇全文，保持回答有据可查。'
 
-const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey'])
+const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey', 'pdf2zhApiKey'])
 
 /* ── 文献聊天（M3.2 rev4）：每篇论文支持多个对话实例 + History 分组 ───
  * conversations[] 平铺：paper 实例 sessionId = zotero-paper-<key>[-<seq>]，
@@ -613,6 +624,7 @@ export interface PanelRouteHandler {
 }
 
 export function panelApiHandler(deps: PanelApiDeps): PanelRouteHandler {
+  setFullTranslateRuntime(deps.client ?? null, deps.llm ?? null, deps.agentDefaultModel)
   return (req, res) => void handle(req, res, deps)
 }
 
@@ -671,6 +683,10 @@ async function handle(
         await streamPdf(req, res, client, query.get('key')!)
         return
       }
+      if (path === '/pdfjs-worker') {
+        await sendPdfJsWorker(res)
+        return
+      }
       if (path === '/open' && query.get('key')) {
         const attachmentKey = query.get('key')!
         const target = query.get('target') === 'system' ? 'system' : 'zotero'
@@ -696,6 +712,21 @@ async function handle(
         }
       }
       if (path === '/artifacts') return send(res, 200, { artifacts: readArtifacts(currentConfig()) })
+      if (path === '/fulltranslate/status' && query.get('attachmentKey')) {
+        const r = fullTranslateStatus(query.get('attachmentKey')!)
+        return send(res, 200, { ok: true, job: r.job })
+      }
+      if (path === '/pdf2zh/status' && query.get('attachmentKey')) {
+        const job = statusPdf2zh(query.get('attachmentKey')!)
+        return send(res, 200, { ok: true, configured: pdf2zhConfigured(currentConfig()), job })
+      }
+      if (path === '/pdf2zh/file' && query.get('attachmentKey')) {
+        const files = findOutput(currentConfig(), query.get('attachmentKey')!)
+        const p = query.get('type') === 'mono' ? files?.mono : files?.dual
+        if (!p || !existsSync(p)) return send(res, 404, { error: '产物不存在（任务可能未完成）' })
+        await streamLocalFile(req, res, p)
+        return
+      }
     }
 
     if (req.method === 'POST') {
@@ -746,6 +777,33 @@ async function handle(
         client.updateConfig(next)
         return send(res, 200, { ok: true, config: maskConfig(next) })
       }
+      if (path === '/translate') {
+        return send(res, 200, await translateOf(deps, body))
+      }
+      if (path === '/fulltranslate/start') {
+        const itemKey = String(body.itemKey ?? '')
+        const attachmentKey = String(body.attachmentKey ?? '')
+        if (!itemKey || !attachmentKey) return send(res, 200, { ok: false, error: '需要 itemKey 与 attachmentKey' })
+        return send(res, 200, await startFullTranslate(client, llm, agentDefaultModel, itemKey, attachmentKey))
+      }
+      if (path === '/fulltranslate/pause') {
+        return send(res, 200, pauseFullTranslate(String(body.attachmentKey ?? '')))
+      }
+      if (path === '/fulltranslate/resume') {
+        return send(res, 200, resumeFullTranslate(String(body.attachmentKey ?? '')))
+      }
+      if (path === '/fulltranslate/cancel') {
+        return send(res, 200, cancelFullTranslate(String(body.attachmentKey ?? '')))
+      }
+      if (path === '/pdf2zh/start') {
+        const itemKey = String(body.itemKey ?? '')
+        const attachmentKey = String(body.attachmentKey ?? '')
+        if (!itemKey || !attachmentKey) return send(res, 200, { ok: false, error: '需要 itemKey 与 attachmentKey' })
+        return send(res, 200, await startPdf2zh(client, attachmentKey, itemKey))
+      }
+      if (path === '/pdf2zh/cancel') {
+        return send(res, 200, cancelPdf2zh(String(body.attachmentKey ?? '')))
+      }
       if (path === '/artifacts') {
         const artifact = body as { type?: string; title?: string; payload?: string }
         if (artifact.type && artifact.title) {
@@ -781,6 +839,43 @@ function readBody(req: any): Promise<string> {
 function send(res: Res, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(body))
+}
+
+/** 提供 pdfjs-dist worker（client 侧 pdf.js 渲染用；失败回退 fake worker）。 */
+async function sendPdfJsWorker(res: Res): Promise<void> {
+  try {
+    const require = createRequire(import.meta.url)
+    const workerPath = require.resolve('pdfjs-dist/build/pdf.worker.min.mjs')
+    const content = readFileSync(workerPath, 'utf8')
+    res.writeHead(200, {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Content-Length': String(Buffer.byteLength(content)),
+      'Cache-Control': 'no-store',
+      'Access-Control-Allow-Origin': '*',
+    })
+    res.end(content)
+  } catch (err: any) {
+    send(res, 200, { ok: false, error: String(err?.message ?? err) })
+  }
+}
+
+/** POST /translate — 划词即时翻译（共用 translate.ts：缓存 + 上下文注入）。 */
+async function translateOf(deps: PanelApiDeps, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  try {
+    const r = await translateText({
+      llm: deps.llm,
+      agentDefaultModel: deps.agentDefaultModel,
+      client: deps.client,
+      text: String(body.text ?? ''),
+      itemKey: body.itemKey ? String(body.itemKey) : undefined,
+      targetLang: body.targetLang ? String(body.targetLang) : undefined,
+      sourceLang: body.sourceLang ? String(body.sourceLang) : undefined,
+    })
+    return { ...r, ok: r.ok, text: r.text, cached: r.cached }
+  } catch (err: any) {
+    if (err?.name === 'AbortError') throw err
+    return { ok: false, text: '', cached: false, error: String(err?.message ?? err), hint: '', targetLang: '', sourceLang: 'auto', chars: 0 }
+  }
 }
 
 /** Stream a Zotero attachment PDF (Chromium iframe/pdf viewer friendly, Range supported). */
@@ -822,8 +917,40 @@ async function streamPdf(
   }
 }
 
-function parseByteRange(raw: unknown, size: number): { start: number; end: number } | null {
-  if (typeof raw !== 'string' || !raw.startsWith('bytes=')) return null
+/** 流式返回本地文件（pdf2zh 产物等；Range 友好，供 iframe/pdf.js）。 */
+async function streamLocalFile(
+  req: { headers?: Record<string, string | string[] | undefined> },
+  res: Res,
+  p: string,
+): Promise<void> {
+  try {
+    const size = statSync(p).size
+    const mime = /\.pdf$/i.test(p) ? 'application/pdf' : 'application/octet-stream'
+    const rawRange = req.headers?.range
+    const range = parseByteRange(rawRange, size)
+    const base = {
+      'Content-Type': mime,
+      'Accept-Ranges': 'bytes',
+      'Content-Disposition': `inline; filename="${encodeURIComponent(p.split(/[\\/]/).pop() ?? 'file.pdf')}"`,
+    }
+    if (range) {
+      const { start, end } = range
+      res.writeHead(206, {
+        ...base,
+        'Content-Range': `bytes ${start}-${end}/${size}`,
+        'Content-Length': String(end - start + 1),
+      })
+      createReadStream(p, { start, end }).pipe(res as unknown as NodeJS.WritableStream)
+      return
+    }
+    res.writeHead(200, { ...base, 'Content-Length': String(size) })
+    createReadStream(p).pipe(res as unknown as NodeJS.WritableStream)
+  } catch (err: any) {
+    send(res, 500, { error: String(err?.message ?? err) })
+  }
+}
+
+function parseByteRange(raw: unknown, size: number): { start: number; end: number } | null {  if (typeof raw !== 'string' || !raw.startsWith('bytes=')) return null
   const m = /bytes=(\d*)-(\d*)/.exec(raw)
   if (!m) return null
   const [, s, e] = m

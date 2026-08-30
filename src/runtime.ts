@@ -32,6 +32,11 @@ export const DEFAULT_CONFIG: Config = {
   chatWithPdfPrompt: '',
   summaryPrompt: '',
   translatePrompt: '',
+  translateTargetLang: 'zh',
+  pdf2zhBaseUrl: 'https://api.deepseek.com/v1',
+  pdf2zhApiKey: '',
+  pdf2zhModel: 'deepseek-chat',
+  pdf2zhThreads: 4,
   ragEnabled: false,
   cacheDir: '',
 }
@@ -70,6 +75,8 @@ function sanitizeOverlay(raw: unknown): Partial<Config> {
   num('mineruMaxAutoPages', 1, 10000); num('fullTextTokenBudget', 1000, 500000)
   str('chatWithPdfPrompt'); str('summaryPrompt'); str('translatePrompt')
   bool('ragEnabled'); str('cacheDir')
+  str('translateTargetLang')
+  str('pdf2zhBaseUrl'); str('pdf2zhApiKey'); str('pdf2zhModel'); num('pdf2zhThreads', 1, 16)
   return out
 }
 
