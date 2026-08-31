@@ -80,6 +80,14 @@ const LIBRARY_PILLS: Array<{ label: string; text: string }> = [
   { label: '收藏夹剖析', text: '我收藏夹里最近添加的论文讲了什么？按主题归纳并按重要性排序。' },
 ]
 
+/** 纯精读/通读指令（无具体问题）→ 保持全文节选注入；带具体问题 → 检索召回。 */
+function isPlainReadCommand(text: string): boolean {
+  const t = text.trim()
+  if (!t) return true
+  if (t.length < 12) return false
+  return /(请)?(通读|精读|阅读).{0,24}(全文|论文|PDF)|结构化精读|Key Points|概述这篇论文|一句话主线/.test(t)
+}
+
 /** 浮窗打开请求（面板 dispatch / 本窗监听）。 */
 export function dispatchChatOpen(detail:
   | { target: 'paper'; itemKey: string; title: string; sendRead?: boolean; parent?: string; cwd?: string }
@@ -258,6 +266,9 @@ export function ChatWindow(): JSX.Element {
     const r = await apiPost('/chat-send', {
       sessionId: active.sessionId,
       text,
+      // rag=true：@论文引用且带具体问题时，host 走检索召回模式（zotero_retrieve 同管线）
+      // 注入最相关章节证据而非全文头部截断；纯精读指令（mode=pdf 无问题）仍全文节选。
+      rag: useChips.some((c) => c.mode === 'pdf') && !isPlainReadCommand(text),
       papers: useChips.map((c) => ({ itemKey: c.itemKey, mode: c.mode })),
     })
     setSending(false)

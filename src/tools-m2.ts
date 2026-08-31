@@ -21,6 +21,7 @@ import type { ZoteroClient } from './zotero/client.ts'
 import { resolveModel, streamText } from './ml.ts'
 import type { ResolvedModel } from './ml.ts'
 import { currentConfig } from './runtime.ts'
+import { retrieveEvidence } from './retrieval/service.ts'
 
 const renderJson = (_args: unknown, value: unknown) => [
   { type: 'text' as const, text: JSON.stringify(value, null, 2) },
@@ -418,6 +419,84 @@ export function registerM2Tools(
       presentCall: (args) => ({
         card: 'generic',
         title: `读全文: ${String((args as { itemKey?: unknown }).itemKey ?? '')}`,
+        kind: 'other',
+        rawInput: args,
+      }),
+    }),
+  )
+
+  /* ── zotero_retrieve：论文内证据检索（BM25 + 意图/章节加权，移植 llm-for-zotero） ── */
+  ctx.tools.register(
+    defineTool({
+      name: 'zotero_retrieve',
+      description:
+        'Retrieve evidence snippets from a parsed paper by relevance (BM25 + query-intent section boosting, ported from llm-for-zotero): splits the full-text cache into ~2000-char chunks, ranks them, and returns top-k hits with section label, char offset and score. Use this instead of zotero_read_fulltext when you need the most relevant passages for a specific question (single paper), not a sequential section read. Answers should cite section labels when quoting.',
+      parameters: {
+        itemKey: { type: 'string', required: true, description: 'Zotero item key (paper).' },
+        query: { type: 'string', required: true, description: 'The question or keywords to find evidence for.' },
+        attachmentKey: { type: 'string', description: 'Specific PDF attachment key; default = first PDF attachment.' },
+        topK: { type: 'number', description: 'Max hits (default 5, max 12).' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', required: true },
+            itemKey: { type: 'string', required: true },
+            title: { type: 'string', required: true },
+            query: { type: 'string', required: true },
+            intent: { type: 'string', required: true },
+            hits: {
+              type: 'array', required: true,
+              items: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  chunkIndex: { type: 'integer', required: true },
+                  sectionLabel: { type: 'string', required: true },
+                  score: { type: 'number', required: true },
+                  offset: { type: 'integer', required: true },
+                  charLen: { type: 'integer', required: true },
+                  text: { type: 'string', required: true },
+                },
+              },
+            },
+            totalChunks: { type: 'integer', required: true },
+            textChars: { type: 'integer', required: true },
+            latencyMs: { type: 'integer', required: true },
+            cached: { type: 'boolean', required: true },
+            error: { type: 'string', required: true },
+            hint: { type: 'string', required: true },
+          },
+        },
+        render: renderJson,
+      },
+      timeoutMs: 300_000,
+      execute: async (args, exec) => {
+        const a = args as { itemKey: string; query: string; attachmentKey?: string; topK?: number }
+        const fail = (error: string) => ({
+          status: 'error' as const, itemKey: a.itemKey, title: '', query: a.query ?? '',
+          intent: '', hits: [], totalChunks: 0, textChars: 0, latencyMs: 0, cached: false,
+          error, hint: '可先 zotero_read_pdf 确认解析可用，或用 zotero_read_fulltext 顺序精读',
+        })
+        try {
+          if (!a.query?.trim()) return fail('需要 query')
+          const parsed = await ensureParsed(client, cfg, 'auto', a.itemKey, a.attachmentKey, exec)
+          const res = await retrieveEvidence(parsed, a.query, { topK: a.topK })
+          return {
+            status: 'ok', itemKey: a.itemKey, title: parsed.title, query: res.query,
+            intent: res.intent, hits: res.hits, totalChunks: res.totalChunks,
+            textChars: res.textChars, latencyMs: res.latencyMs, cached: res.cached,
+            error: '', hint: '',
+          }
+        } catch (err: any) {
+          return fail(String(err?.message ?? err))
+        }
+      },
+      isConcurrencySafe: () => false,
+      presentCall: (args) => ({
+        card: 'generic',
+        title: `检索证据: ${String((args as { itemKey?: unknown }).itemKey ?? '')}`,
         kind: 'other',
         rawInput: args,
       }),

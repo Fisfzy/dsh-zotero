@@ -46,16 +46,17 @@ import {
   startMineruBatch,
   testMineruConnection,
 } from './mineru-manager.ts'
+import { retrieveEvidence } from './retrieval/service.ts'
 import { composeConfig, currentConfig, setActiveConfig, writeOverlay } from './runtime.ts'
 
 export const PLUGIN_ID = '@dsh-external/dsh-zotero'
 export const API_PREFIX = '/@dsh-external/dsh-zotero/api'
 
 const READ_PROMPT =
-  '「Zotero 开读」——请以精读模式阅读上面注入的论文：先一句话概述核心贡献，再按章节提炼要点（方法/关键结果/局限），最后给 3 个可深入追问的问题。信息不足时用 zotero_read_fulltext 分段读取缓存全文（先免参拿 sections 章节偏移，再按 offset 精读各章），或用 zotero_summarize 补定向总结。'
+  '「Zotero 开读」——请以精读模式阅读上面注入的论文：先一句话概述核心贡献，再按章节提炼要点（方法/关键结果/局限），最后给 3 个可深入追问的问题。信息不足时用 zotero_retrieve 按问题检索最相关章节证据（快、省 token），或 zotero_read_fulltext 分段读取缓存全文（先免参拿 sections 章节偏移，再按 offset 精读各章），或用 zotero_summarize 补定向总结。'
 
 const LIBRARY_MODE_PROMPT =
-  '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_read_fulltext（读取缓存全文——先免参调用拿 sections 章节偏移，再按 offset/limit 分段精读）或 zotero_read_pdf（预览）/ zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字）。一次不要读取超过 2 篇全文，保持回答有据可查。\n\n分析能力（复刻 llm-for-zotero）：单篇总结 zotero_summarize（mode=overview|targeted|deep，depth=brief|standard|deep）；多篇 zotero_batch_summarize（2-10 篇批量总结+横向对比）；跨篇综述 zotero_review（itemKeys 或 query 自动收论文 → 要点提炼 → 综述）；相关文献 zotero_related（关键词重叠，零 LLM）。遇到“比较/总结这几篇”“写个综述”“找相关文献”类需求优先用它们。'
+  '你是 Zotero 文献库精读助手。用户会问本库文献的问题：先用 zotero_library_search（支持全文 qmode=everything）找到相关论文，再用 zotero_retrieve（按问题检索单篇论文内最相关章节证据，快且省 token）/ zotero_read_fulltext（读取缓存全文——先免参调用拿 sections 章节偏移，再按 offset/limit 分段精读）/ zotero_read_pdf（预览）/ zotero_summarize(zotero_translate) 深读，最后给出结构化回答（引用具体论文标题/年份/关键数字，引文标注章节）。一次不要读取超过 2 篇全文，保持回答有据可查。若库内有 zotero_search 工具（zotero-wave-rag），多篇/语义主题检索优先用它。\n\n分析能力（复刻 llm-for-zotero）：单篇总结 zotero_summarize（mode=overview|targeted|deep，depth=brief|standard|deep）；多篇 zotero_batch_summarize（2-10 篇批量总结+横向对比）；跨篇综述 zotero_review（itemKeys 或 query 自动收论文 → 要点提炼 → 综述）；相关文献 zotero_related（关键词重叠，零 LLM）。遇到“比较/总结这几篇”“写个综述”“找相关文献”类需求优先用它们。'
 
 const SECRET_FIELDS = new Set(['localApiKey', 'webApiKey', 'mineruCloudApiKey', 'pdf2zhApiKey'])
 
@@ -533,14 +534,17 @@ export async function sendChatMessage(
     return { ok: false, error: String((err as Error)?.message ?? err) }
   }
   try {
-    // @论文 引用：发送前逐个注入（pdf=全文精读模式 qa；meta=元数据+摘要）。
+    // @论文 引用：发送前逐个注入（pdf=全文精读模式 qa，meta=元数据+摘要；
+    // ragEnabled 或带具体问题时用检索召回模式 rag——按用户问题检索证据注入，省 token 且更相关）。
     const papers = Array.isArray(body.papers) ? (body.papers as Array<Record<string, unknown>>) : []
+    const text = String(body.text ?? '').trim()
+    const useRag = body.rag === true || body.rag === 'true' || Boolean(currentConfig().ragEnabled)
     let chars = 0
     for (const p of papers.slice(0, 4)) {
       const itemKey = String(p?.itemKey ?? '')
       if (!itemKey) continue
-      const mode = p.mode === 'pdf' ? 'qa' : 'meta'
-      const built = await buildPaperContext(deps, { ...body, itemKey, mode })
+      const mode = p.mode === 'pdf' ? (useRag && text ? 'rag' : 'qa') : 'meta'
+      const built = await buildPaperContext(deps, { ...body, itemKey, mode, ...(mode === 'rag' ? { query: text } : {}) })
       if (built.ok) {
         injectText(agent, built.text)
         chars += built.chars
@@ -1065,7 +1069,7 @@ async function buildPaperContext(deps: PanelApiDeps, body: Record<string, unknow
   if (it.doi) lines.push(`- DOI: ${it.doi}`)
   if (it.url) lines.push(`- URL: ${it.url}`)
   lines.push(`- 标签: ${it.tags.join(', ') || '(无)'}`)
-  lines.push(`- Zotero key: ${it.key}（可调用 zotero_get_item / zotero_read_fulltext 读取全文——先免参调用拿 sections 章节偏移，再按 offset/limit 精读各章；zotero_read_pdf 仅预览）`)
+  lines.push(`- Zotero key: ${it.key}（可调用 zotero_get_item / zotero_read_fulltext / zotero_retrieve 读取全文——zotero_retrieve 按问题检索最相关章节证据；zotero_read_fulltext 按 offset 精读各章；zotero_read_pdf 仅预览）`)
   if (it.abstractNote) lines.push(`- 摘要: ${it.abstractNote.slice(0, 1200)}`)
   const mode = String(body.mode ?? 'meta')
   if (mode === 'qa') {
@@ -1074,6 +1078,29 @@ async function buildPaperContext(deps: PanelApiDeps, body: Record<string, unknow
       const budget = Math.max(cfg.fullTextTokenBudget * 2, 8000)
       lines.push('【全文节选（缓存文本，供精读问答；可用 zotero_summarize 做定向总结）】')
       lines.push(parsed.md.slice(0, budget))
+    } catch (err: any) {
+      lines.push(`【全文解析失败：${String(err?.message ?? err)}】`)
+    }
+  } else if (mode === 'rag') {
+    // ── 检索召回模式：用用户问题在缓存全文中检索 top 证据片段注入（复刻上游证据打包） ──
+    const query = String(body.query ?? '').trim()
+    try {
+      const parsed = await ensureParsed(client, cfg, 'auto', itemKey, String(body.attachmentKey ?? '') || undefined)
+      if (query) {
+        const res = await retrieveEvidence(parsed, query, { topK: Number(body.retrieveTopK ?? 4) })
+        lines.push(`【检索证据 · 针对问题「${query.slice(0, 120)}」】(命中 ${res.hits.length}/${res.totalChunks} 块，意图 ${res.intent}，用时 ${res.latencyMs}ms${res.cached ? '，缓存' : ''})`)
+        if (res.hits.length === 0) {
+          lines.push('（无显著命中——可改用 zotero_read_fulltext 顺序精读或 zotero_summarize）')
+        }
+        for (const h of res.hits) {
+          const head = h.sectionLabel ? `## ${h.sectionLabel}（chunk #${h.chunkIndex}, score ${h.score}, offset ${h.offset}）` : `## chunk #${h.chunkIndex}`
+          lines.push(`\n${head}\n${h.text}`)
+        }
+      } else {
+        // 无具体问题 → 回退头部节选。
+        lines.push('【全文节选（缓存文本；追问具体问题时将自动按检索召回注入）】')
+        lines.push(parsed.md.slice(0, Math.max(cfg.fullTextTokenBudget * 2, 8000)))
+      }
     } catch (err: any) {
       lines.push(`【全文解析失败：${String(err?.message ?? err)}】`)
     }
