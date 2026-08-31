@@ -107,6 +107,8 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
   const [mo, setMo] = useState<{ ok?: boolean; total: number; parsed: number; items: any[] } | null>(null)
   const [mj, setMj] = useState<{ state: string; total: number; done: number; current: string; errors: string[] } | null>(null)
   const [mgMsg, setMgMsg] = useState('')
+  /** MinerU 配置分组内的测试连接结果。 */
+  const [mguTestMsg, setMguTestMsg] = useState('')
   /** 阅读模式：{论文 key, 标题, PDF 附件 key}；非空时面板主体 = PDF 阅读器。 */
   const [reading, setReading] = useState<{ key: string; title: string; attachmentKey: string } | null>(null)
   /** 设置分组展开状态（localStorage 持久化）。 */
@@ -512,6 +514,19 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
                 </div>
               </>
             ) : null}
+            <div className="dshz-field" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                className="dshz-btn"
+                onClick={() => {
+                  setMguTestMsg('')
+                  void apiPost('/mineru/test', {})
+                    .then((r) => setMguTestMsg(`🔌 ${String(r.message ?? (r.ok ? '连接正常' : '连接失败'))}`))
+                    .catch((e) => setMguTestMsg(`测试失败: ${String(e?.message ?? e)}`))
+                }}
+                title="按上方「后端模式」选择测试本地或云端"
+              >测试连接</button>
+              {mguTestMsg ? <span className="dshz-kv" style={{ color: mguTestMsg.startsWith('🔌 连接失败') ? '#FF8B84' : undefined }}>{mguTestMsg}</span> : null}
+            </div>
             <div className="dshz-field">
               <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <input type="checkbox" checked={form.mineruForceOcr === 'true'} onChange={(e) => setForm((f) => ({ ...f, mineruForceOcr: String(e.target.checked) }))} />
