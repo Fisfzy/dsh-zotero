@@ -117,16 +117,48 @@ Retrieved Evidence:
 上游把「读什么」从模型运行时决策前移为**索引时静态构建 + 查询时确定排序**，模型只消费高相关证据包；
 本插件把「读什么」留给模型用工具自行探索，靠 agentic 循环弥补——token 消耗高、相关性不确定、引用纪律依赖 prompt。
 
-## 五、可移植路线（由浅入深）
+## 五、复刻进度（2026-08-31 已落地 `2b0b019`）
+
+对照上游五层管线逐项核对——**核心检索件已复刻，链路级差异（查询改写/语义/MMR/证据打包）未复刻**：
+
+| 上游机制 | 本插件状态 | 落地位置 |
+|---|---|---|
+| `splitMarkdownIntoChunks`（标题切章/段落累积/句子边界切片/200 overlap） | ✅ **完全复刻**（同款算法，含 `findSentenceBoundary` 缩写保护） | `src/retrieval/indexer.ts` |
+| `buildChunkIndex`（tf/docFreq/avgLen 统计 + chunk 元数据） | ✅ **完全复刻**（sectionLabel/行号/页映射） | `src/retrieval/indexer.ts` |
+| `scoreChunkBM25`（k1=1.2, b=0.75） | ✅ **完全复刻**（同参数） | `src/retrieval/rank.ts` |
+| `detectQueryIntent`（7 类）+ `SECTION_BOOST_PROFILES` | ✅ **完全复刻** + 增强（补 `how is/are/how do` 正则→conceptual） | `src/retrieval/rank.ts` |
+| `scoreEvidenceHeuristics`（短块/引用列表惩罚） | ✅ 复刻子集（无 anchorText/leadingNoise——本插件无该元数据源） | `src/retrieval/rank.ts` |
+| `RetrievalService.evidenceCache` | ✅ **复刻**（规范化查询 key + LRU 200） | `src/retrieval/service.ts` |
+| `zotero_retrieve` 工具 | ✅ **新增**（上游无同名工具，其检索是内部 service） | `src/tools-m2.ts` |
+| `buildPaperContext` qa → 检索召回注入 | ✅ **新增 rag 模式**（meta≈1.8K / rag≈5.9K / 旧 qa 头部 40K+） | `src/panel-api.ts` |
+| `RetrievalService.retrieveEvidence` 跨篇 topK 聚合 | ⚠️ 部分（面板 @ 引用最多 4 篇逐个注入，无全局 topK 排序） | `src/panel-api.ts` |
+| `retrievalQueryPlan`（LLM 变体 + 语义查询） | ❌ 未复刻 | P2 |
+| `ensureEmbeddings` + cosine + embedding 降级 | ❌ 未复刻（纯词法） | P5 |
+| RRF 融合进打分管线 | ⚠️ 仅导出 `rrfFuse` 接口，未接入（单通道 BM25） | P3 |
+| MMR 多样性去重 | ❌ 未复刻 | P3 |
+| 引用解析/boost + preferredChunkIndexes/body 保底 | ❌ 未复刻 | P3 |
+| `buildEvidencePack`（coverage ledger / quote anchors / synthesisDigest） | ❌ 未复刻（注入层是简单证据块） | P4 |
+| `paperSearch` / `libraryIndexService` / `conversationSearchIndex` | ❌ 未复刻（库级借 Zotero qmode + wave-rag zotero_search） | P6 |
+
+## 六、我们在上游基础上的改进
+
+| # | 改进 | 说明 |
+|---|---|---|
+| 1 | **意图检测正则补洞** | 上游 `detectQueryIntent` 的 conceptual 分支缺 `how is/are/how do`——"how is the shape matrix computed?" 在上游被判 `general`（章节 boost 平庸），我们补全后正确进 `conceptual`（discussion +1.4） |
+| 2 | **检索成为一等公民工具** | 上游检索是 `RetrievalService` 内部逻辑，模型只能间接用；我们暴露 `zotero_retrieve`，模型可直接按问题取证据，且带缓存与延迟信息 |
+| 3 | **注入策略可开关 + 两级成本** | `ragEnabled` 开关 + 前端 `rag` 标志（纯精读指令豁免）；rag 模式 ≈5.9K 字符 vs 旧 qa 40K+——**token 成本降一个数量级**，且证据更相关 |
+| 4 | **零新依赖** | 上游 embedding/RRF/MMR 依赖模型 API 与 Zotero 进程内服务；我们的 P0「纯文本 BM25 + 缓存」零外部依赖，本地 4ms 出结果 |
+| 5 | **复用 wave-rag 库级能力** | 库级语义检索不重复造轮子：LIBRARY_MODE prompt 引导模型优先 `zotero_search`（wave 图传播），单篇内用我们的 `zotero_retrieve`——**两级检索分工** |
+| 6 | **证据缓存贴合 Chat 追问场景** | 同论文同问题二次追问 `cached=true` 零重算，追问体验无感知延迟 |
+
+## 七、可移植路线（存量差异 → 续做优先级）
 
 | 阶段 | 移植项 | 上游参考 | 本插件落点 |
 |---|---|---|---|
-| P0 | 分块索引：`splitSections` 升级为「标题切 + 段落累积 + 句子边界切片 + 200 overlap」，建 `tf/docFreq/avgLen` 统计 | `splitMarkdownIntoChunks` + `buildChunkIndex` | 新增 `src/retrieval/indexer.ts`（无新依赖，纯文本） |
-| P1 | BM25 打分替换词频计数 + 缓存检索结果 | `scoreChunkBM25` + `RetrievalService.evidenceCache` | `zotero_read_fulltext.query` / targeted summarize 换壳 |
 | P2 | 查询改写（LLM 变体 + 语义查询），注册 `zotero_retrieve` 工具 | `retrievalQueryPlan` | `src/retrieval/queryPlan.ts`（DSH 模型适配器） |
 | P3 | 意图检测 + 章节 boost + RRF 融合 + MMR | `detectQueryIntent`/`SECTION_BOOST_PROFILES`/RRF/MMR | 同上排序层 |
 | P4 | 证据打包：`Retrieved Evidence` + coverage ledger + 引用锚点 | `buildEvidencePack` | 改 `buildPaperContext` 注入块 |
 | P5 | Embedding（可选，DSH 适配器 + 磁盘缓存） | `ensureEmbeddings` | 配置开关，缺省纯词法 |
 | P6 | 语义增量索引（shadow，抄 wave-rag 引擎） | `libraryIndexService` | M4+ |
 
-> 前置依赖：M4 daemon 预解析（批量 MinerU → 缓存）是索引的数据源——先把「全部论文可解析」坐实，索引才有意义。
+> 前置依赖：M4 daemon 预解析（批量 MinerU → 缓存）是索引的数据源——先把「全部论文可解析」坐实，索引才有意义。当前缓存多为 pdftotext 降级产物（无标题 → 章节标签显示 (全文)），接 MinerU 后自动获得真实章节标签，boost 与检索质量同步提升。
