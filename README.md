@@ -39,22 +39,81 @@
 | `zotero_review` | 跨文综述（谱系/方法族/共识/分歧/空白） |
 | `zotero_related` | 相关论文推荐（关键词重叠，零 LLM） |
 
-## 快速开始
+## 前置依赖
 
-1. **Zotero 9+**：Settings → Advanced → Config Editor → `httpServer.localAPI.enabled = true`（默认关闭）。
-   或配置 Web API userId/apiKey 降级。
-2. **安装插件**（注入器环境）：`dev_inject_plugin <本目录>`；或 `npm pack` → 常规安装。
-3. **打开对话页** → 侧栏出现 **Zotero** tab → 点任意论文进入沉浸阅读 / 「文献 CHAT」开聊。
-4. **（可选）全文翻译**：`uv tool install --python 3.12 pdf2zh`，设置页填 OpenAI 兼容接口（如 DeepSeek）。
-   **（可选）MinerU 云解析**：设置页填 mineru.net API Key 并「测试连接」。
+### 必需
 
-## 构建与注入
+| 依赖 | 版本/要求 | 用途 |
+|---|---|---|
+| **Zotero 桌面端** | 9+（本机 9.0.6 实测） | Local API 数据源；默认关闭，需手动开启 |
+| **DSH 运行环境** | 已启用的 DeepSeek Harness Web（含注入器 `dev_*` 工具） | 插件宿主与注入通道 |
+| **Node.js** | ≥ 20（本机 v24.17.0 实测） | 构建/运行 |
+| **pnpm** | ≥ 9（本机 11.7.0 实测） | 安装依赖 —— ⚠️ 勿用 npm 11（Arborist 崩溃） |
+| **bash** | Git Bash（Windows）/ WSL / Linux/macOS 自带 | 运行 `scripts/build.sh` |
+| **构建工具链** | 二选一，`build.mjs` 自动探测：<br>① DSH 源码 checkout（`DSH_CHECKOUT` 或 `~/dsh-harness` 等）<br>② installed dsh（npm 全局 `@deepseek-ai/dsh`）+ donor 插件（`~/.dsh/.external-plugins` 下含 typescript+cordis+tsdown 的已注入插件） | host 编译（tsc） |
+
+### 可选（对应功能）
+
+| 依赖 | 安装 | 解锁功能 |
+|---|---|---|
+| **MinerU 云端** | mineru.net API Key（设置面板填写并「测试连接」） | 高保真全文解析（表格/公式/图） |
+| **MinerU 本地** | mineru-api 服务于 `127.0.0.1:8000` | 同上（本机自托管） |
+| **pdf2zh**（全文翻译） | `uv tool install --python 3.12 pdf2zh`（Python 3.12，3.13 不兼容） | 一键全文翻译 → 双语 PDF |
+
+> MinerU 不可用时自动降级 pdftotext（需系统有 `pdftotext`，MiKTeX/TeXLive 自带），并显式标注来源。
+
+## 装载指南（构建 → 注入 → 首次使用）
+
+### 1. 获取代码
 
 ```bash
-bash scripts/build.sh        # 自动探测 DSH_CHECKOUT / installed dsh + donor toolchain
-npm run build:client         # tsdown 客户端单文件 bundle（pdfjs-dist alwaysBundle）
-# 注入器环境内：dev_inject_plugin <本目录>；改代码后 dev_reload_package
+git clone https://github.com/Fisfzy/dsh-zotero.git
+cd dsh-zotero
 ```
+
+### 2. 安装依赖
+
+```bash
+pnpm install          # 仅 pdfjs-dist（客户端渲染）；npm 11 会崩，务必用 pnpm
+```
+
+### 3. 构建 host（Cordis 插件主体）
+
+```bash
+bash scripts/build.sh # = node scripts/build.mjs：junction 链接构建依赖 → tsc → lib/
+```
+
+自动选择构建模式（见上「构建工具链」），两种模式都不满足时会明确报错并提示缺失项。
+
+### 4. 构建 client（React 面板 bundle）
+
+```bash
+npm run build:client  # = tsdown → lib/client.js（单文件 CJS，pdfjs-dist 打进 bundle）
+```
+
+### 5. 注入到 DSH
+
+在注入器环境中（dsh-super-injector）：
+
+```
+dev_inject_plugin <本插件目录绝对路径>   # 例：D:\AIWORK\...\dsh-zotero
+```
+
+注入即完整生效（host + 面板），免重启。后续改代码后重新构建，再 `dev_reload_package` 热重载即可。
+
+### 6. 首次使用
+
+1. **开启 Zotero Local API**：Settings → Advanced → Config Editor → `httpServer.localAPI.enabled = true`（Zotero 9+ 默认关闭）。
+2. 打开任一对话页 → 右侧栏出现 **Zotero** tab（绿点 = 已连接）。
+3. 点论文进入沉浸 PDF 阅读 / 「文献 CHAT」开聊。
+4. **可选**：设置页填 MinerU Key / pdf2zh 参数 → 「测试连接」→ 保存（热生效，免重载）。
+
+### 常见坑
+
+- ⚠️ `pnpm install` 用 npm 11 执行会在 Arborist 崩溃：始终用 pnpm。
+- 构建报「installed dsh not found / no donor plugin」：先确认 npm 全局装有 `@deepseek-ai/dsh`，且 `~/.dsh/.external-plugins` 下存在一个已注入插件（提供 typescript+cordis+tsdown）。
+- 面板空白/按钮全蓝：DSH GUI 全局 CSS 会污染面板控件，已用 `.dshz[data-dshz-root]` + `!important` 防御；若复现请反馈。
+- Zotero 未开启 Local API 时工具报 403：按上「开启 Local API」步骤处理。
 
 ## 配置（插件 schema，均可在设置面板改、热生效）
 
