@@ -93,6 +93,8 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
   const [sessionId, setSessionId] = useState<string>(String(props.sessionId ?? ''))
   const [status, setStatus] = useState<Record<string, unknown> | null>(null)
   const [tab, setTab] = useState<'lib' | 'out' | 'cfg'>('lib')
+  /** 面板整体收起：只留头部一行（露出主对话），点「展开」恢复。 */
+  const [collapsed, setCollapsed] = useState(false)
   const [query, setQuery] = useState('')
   const [collectionKey, setCollectionKey] = useState('')
   const [recent, setRecent] = useState<RecentItem[]>([])
@@ -283,24 +285,33 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
   }
 
   return (
-    <div className="dshz" style={{ background: 'var(--dshz-panel)' }} data-dshz-root>
+    <div className={`dshz${collapsed ? ' collapsed' : ''}`} style={{ background: 'var(--dshz-panel)' }} data-dshz-root>
       <style>{CSS}</style>
       <div className="dshz-h">
         <span className="dot" style={{ background: dot }} />
         <b>Zotero</b>
         <span className="st" title={statusText}>{statusText}</span>
         <button
-          className="dshz-btn primary"
-          onClick={() => {
-            if (reading) void openReadChat(reading.key, reading.title)
-            else if (detailItem?.key) void openReadChat(String(detailItem.key), String(detailItem.title ?? ''))
-            else setNote('⚠️ 请先选中一篇论文（点开条目进入阅读），或直接使用「文献库 CHAT」。')
-          }}
-        >📄 文献 CHAT</button>
-        <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
-        <button className="dshz-btn" onClick={() => void loadBasics()}>刷新</button>
+          className="dshz-btn"
+          title={collapsed ? '展开面板' : '收起面板（只留这一行）'}
+          onClick={() => setCollapsed((c) => !c)}
+        >{collapsed ? '▸ 展开' : '▾ 收起'}</button>
+        {!collapsed ? (
+          <>
+            <button
+              className="dshz-btn primary"
+              onClick={() => {
+                if (reading) void openReadChat(reading.key, reading.title)
+                else if (detailItem?.key) void openReadChat(String(detailItem.key), String(detailItem.title ?? ''))
+                else setNote('⚠️ 请先选中一篇论文（点开条目进入阅读），或直接使用「文献库 CHAT」。')
+              }}
+            >📄 文献 CHAT</button>
+            <button className="dshz-btn" onClick={() => void dispatchChatOpen({ target: 'library', parent: sessionId, cwd: currentCwd(sessionId) })}>📚 文献库 CHAT</button>
+            <button className="dshz-btn" onClick={() => void loadBasics()}>刷新</button>
+          </>
+        ) : null}
       </div>
-      <div className="dshz-tabs">
+      <div className="dshz-tabs" style={reading ? { display: 'none' } : undefined}>
         <div className={`dshz-tab ${tab === 'lib' ? 'on' : ''}`} onClick={() => setTab('lib')}>库</div>
         <div className={`dshz-tab ${tab === 'out' ? 'on' : ''}`} onClick={() => setTab('out')}>产出物 ({artifacts.length})</div>
         <div className={`dshz-tab ${tab === 'cfg' ? 'on' : ''}`} onClick={() => setTab('cfg')}>设置</div>
@@ -317,26 +328,10 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
         {tab === 'lib' && (
           <>
             {reading ? (
-              /* ── 阅读模式：absolute 填满（脱离流，超高内容不撑破 host 容器） ── */
+              /* ── 沉浸阅读：正文 + PdfReader 工具行占满；退出/回列表在工具行上 ── */
               <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-                <div className="dshz-row" style={{ cursor: 'default', background: '#1e232a', marginTop: 0 }}>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <button className="dshz-btn" onClick={() => setReading(null)}>← 列表</button>
-                    <span className="dshz-note" style={{ flex: 1, minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dshz-fg)', fontSize: 12 }}>
-                      {reading.title || 'PDF'}
-                    </span>
-                  </div>
-                  {detail?.item && (
-                    <div className="dshz-kv" style={{ marginTop: 6 }}>
-                      {detail.item.creators?.length ? <span>作者: {detail.item.creators.map((c: any) => c.fullName).join(', ')} · </span> : null}
-                      {detail.item.year ? <span>{detail.item.year} · </span> : null}
-                      {detail.item.publicationTitle ? <span>{detail.item.publicationTitle} · </span> : null}
-                      {detail.item.doi ? <span>DOI {detail.item.doi}</span> : null}
-                    </div>
-                  )}
-                </div>
                 <div className="dshz-pdf-wrap">
-                  <PdfReader attachmentKey={reading.attachmentKey} itemKey={reading.key} />
+                  <PdfReader attachmentKey={reading.attachmentKey} itemKey={reading.key} onBack={() => setReading(null)} />
                 </div>
               </div>
             ) : (
@@ -618,8 +613,8 @@ export function ZoteroPanel(props: { sessionId?: string } & Record<string, unkno
           </>
         )}
         </div>
+        </div>
       </div>
-    </div>
   )
 }
 

@@ -416,6 +416,9 @@ a.dshz-btn.primary{color:#fff}
 .dshz[data-dshz-root] .dshz-seg button.on{background-color:var(--ios-bg) !important;color:#fff !important}
 .dshz[data-dshz-root] input.dshz-input,.dshz[data-dshz-root] textarea.dshz-input{border-radius:12px !important}
 .dshz[data-dshz-root] .dshz-ft-card,.dshz[data-dshz-root] .dshz-row{border-radius:14px !important}
+/* 面板收起：只留头部一行（露出主对话）；CSS 隐藏，不动 JSX 结构 */
+.dshz[data-dshz-root].collapsed .dshz-tabs,
+.dshz[data-dshz-root].collapsed .dshz-b{display:none !important}
 .dshz[data-dshz-root] .dshz-sel,
 .dshz[data-dshz-root] .dshz-sel:hover,
 .dshz[data-dshz-root] .dshz-sel:focus,

@@ -28,6 +28,8 @@ const RENDER_MARGIN = 700 // px，视口外多少范围内保持渲染
 interface PdfReaderProps {
   attachmentKey: string
   itemKey?: string
+  /** 返回列表（沉浸阅读时由外部提供；无则不显示该按钮）。 */
+  onBack?: () => void
 }
 
 /** 一键全文翻译（pdf2zh 官方引擎 → 双语 PDF，页内 iframe 呈现）。 */
@@ -154,7 +156,7 @@ export function FullTranslatePanel(props: { itemKey: string; attachmentKey: stri
 }
 
 export function PdfReader(props: PdfReaderProps): JSX.Element {
-  const { attachmentKey, itemKey } = props
+  const { attachmentKey, itemKey, onBack } = props
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const docRef = useRef<PDFDocumentProxy | null>(null)
@@ -482,6 +484,7 @@ export function PdfReader(props: PdfReaderProps): JSX.Element {
       {/* 阅读器工具条（进入翻译面板后隐藏——按钮合并进翻译栏，避免双栏冗余） */}
       {!ftView ? (
         <div className="dshz-pdf-toolbar">
+          {onBack ? <button className="dshz-btn" onClick={onBack} title="返回列表">← 列表</button> : null}
           <button className="dshz-btn" onClick={() => goPage(Math.max(1, current - 1))} disabled={numPages === 0 || current <= 1} title="上一页">‹</button>
           <span className="pg">{numPages ? `${current} / ${numPages}` : '…'}</span>
           <button className="dshz-btn" onClick={() => goPage(Math.min(numPages, current + 1))} disabled={numPages === 0 || current >= numPages} title="下一页">›</button>
