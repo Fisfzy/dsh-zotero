@@ -196,8 +196,8 @@ export function ChatWindow(): JSX.Element {
     if (near) el.scrollTop = el.scrollHeight
   }, [messages])
 
-  /** 打开/新建论文对话实例：seq=0 → 新建（max+1）；seq>0 → 复用指定实例。 */
-  async function openPaper(itemKey: string, title: string, seq: number, sendRead: boolean, parent: string, cwd: string): Promise<void> {
+  /** 打开/新建论文对话实例：seq=0 → 新建（max+1）；seq>0 → 复用指定实例。返回 sessionId 或 null。 */
+  async function openPaper(itemKey: string, title: string, seq: number, sendRead: boolean, parent: string, cwd: string): Promise<string | null> {
     setBooting(true)
     setNote('')
     try {
@@ -207,18 +207,20 @@ export function ChatWindow(): JSX.Element {
         sendRead, parent, cwd,
       }, 180000)
       setBooting(false)
-      if (!r.ok) { setNote(`⚠️ ${r.error ?? '打开失败'}`); return }
+      if (!r.ok) { setNote(`⚠️ ${r.error ?? '打开失败'}`); return null }
       setActive({ kind: 'paper', itemKey, title: title || itemKey, sessionId: r.sessionId, seq: r.seq ?? seq ?? 1 })
       setChips([{ itemKey, title: title || itemKey, mode: 'pdf' }])
       if (r.chars) setNote(`✅ 已载入论文上下文（${r.chars} 字符）。${sendRead ? '已发送精读指令，模型正在阅读…' : ''}`)
       await apiGet('/chat-sessions').then((x) => setConvs(x.conversations ?? [])).catch(() => {})
+      return r.sessionId
     } catch (err: any) {
       setBooting(false)
       setNote(`⚠️ ${String(err?.message ?? err)}`)
+      return null
     }
   }
 
-  async function openLibrary(parent: string, cwd: string, seq = 0, fresh = false): Promise<void> {
+  async function openLibrary(parent: string, cwd: string, seq = 0, fresh = false): Promise<string | null> {
     setBooting(true)
     setNote('')
     try {
@@ -228,13 +230,15 @@ export function ChatWindow(): JSX.Element {
         ...(fresh ? { fresh: true } : {}),
       }, 90000)
       setBooting(false)
-      if (!r.ok) { setNote(`⚠️ ${r.error ?? '打开失败'}`); return }
+      if (!r.ok) { setNote(`⚠️ ${r.error ?? '打开失败'}`); return null }
       setActive({ kind: 'library', title: '文献库对话', sessionId: r.sessionId, seq: r.seq ?? seq })
       setChips([])
       await apiGet('/chat-sessions').then((x) => setConvs(x.conversations ?? [])).catch(() => {})
+      return r.sessionId
     } catch (err: any) {
       setBooting(false)
       setNote(`⚠️ ${String(err?.message ?? err)}`)
+      return null
     }
   }
 
@@ -259,12 +263,19 @@ export function ChatWindow(): JSX.Element {
   async function send(textArg?: string, chipsArg?: PaperChip[]): Promise<void> {
     const text = (textArg ?? input).trim()
     const useChips = chipsArg ?? chips
-    if (!text || !active || sending) return
+    if (!text || sending) return
+    // 无激活会话：自动打开文献库会话再发（修复「输入无反应」——发送按钮曾因 !active 永久灰化）。
+    let sid = active?.sessionId ?? ''
+    if (!sid) {
+      const opened = await openLibrary('', '', 0, false)
+      if (!opened) { setNote('⚠️ 未选择会话，且自动打开文献库失败。请先点「文献库对话」或打开一篇论文。'); return }
+      sid = opened
+    }
     setSending(true)
     setInput('')
     setAtOpen(false)
     const r = await apiPost('/chat-send', {
-      sessionId: active.sessionId,
+      sessionId: sid,
       text,
       // rag=true：@论文引用且带具体问题时，host 走检索召回模式（zotero_retrieve 同管线）
       // 注入最相关章节证据而非全文头部截断；纯精读指令（mode=pdf 无问题）仍全文节选。
@@ -560,7 +571,7 @@ export function ChatWindow(): JSX.Element {
                 </div>
               ) : null}
             </div>
-            <button className="dshz-btn primary" disabled={sending || !active || !input.trim()} onClick={() => void send()}>
+            <button className="dshz-btn primary" disabled={sending || !input.trim()} onClick={() => void send()}>
               {sending ? '…' : '发送'}
             </button>
             {messages.some((m) => m.running) ? (
