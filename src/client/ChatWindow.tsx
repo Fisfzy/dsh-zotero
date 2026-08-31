@@ -105,6 +105,8 @@ export function ChatWindow(): JSX.Element {
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  /* 当前主会话工作目录（openPaper/openLibrary/send 传参用，保证 agent 工作区归属一致）。 */
+  const [activeCwd, setActiveCwd] = useState('')
   /* @论文 引用 */
   const [chips, setChips] = useState<PaperChip[]>([])
   const [atOpen, setAtOpen] = useState(false)
@@ -126,10 +128,11 @@ export function ChatWindow(): JSX.Element {
     const onOpen = (ev: Event): void => {
       const detail = (ev as CustomEvent).detail as { target: string; itemKey?: string; title?: string; sendRead?: boolean; parent?: string; cwd?: string }
       setHidden(false)
+      if (detail.cwd) setActiveCwd(detail.cwd)
       if (detail.target === 'paper' && detail.itemKey) {
-        void openPaper(detail.itemKey, detail.title ?? '', 0, detail.sendRead ?? false, detail.parent ?? '', detail.cwd ?? '')
+        void openPaper(detail.itemKey, detail.title ?? '', 0, detail.sendRead ?? false, detail.parent ?? '', detail.cwd ?? activeCwd)
       } else if (detail.target === 'library') {
-        void openLibrary(detail.parent ?? '', detail.cwd ?? '')
+        void openLibrary(detail.parent ?? '', detail.cwd ?? activeCwd)
       }
     }
     window.addEventListener(OPEN_EVENT, onOpen)
@@ -266,10 +269,12 @@ export function ChatWindow(): JSX.Element {
     if (!text || sending) return
     // 无激活会话：自动打开文献库会话再发（修复「输入无反应」——发送按钮曾因 !active 永久灰化）。
     let sid = active?.sessionId ?? ''
+    let cwd = activeCwd
     if (!sid) {
       const opened = await openLibrary('', '', 0, false)
       if (!opened) { setNote('⚠️ 未选择会话，且自动打开文献库失败。请先点「文献库对话」或打开一篇论文。'); return }
       sid = opened
+      cwd = activeCwd
     }
     setSending(true)
     setInput('')
@@ -277,6 +282,7 @@ export function ChatWindow(): JSX.Element {
     const r = await apiPost('/chat-send', {
       sessionId: sid,
       text,
+      ...(cwd ? { cwd } : {}),
       // rag=true：@论文引用且带具体问题时，host 走检索召回模式（zotero_retrieve 同管线）
       // 注入最相关章节证据而非全文头部截断；纯精读指令（mode=pdf 无问题）仍全文节选。
       rag: useChips.some((c) => c.mode === 'pdf') && !isPlainReadCommand(text),
@@ -418,7 +424,7 @@ export function ChatWindow(): JSX.Element {
             className={isPaper ? 'on' : ''}
             onClick={() => {
               if (active?.kind === 'paper') return
-              for (const g of paperGroups) { void openPaper(g.itemKey, g.title, 0, false, '', ''); return }
+              for (const g of paperGroups) { void openPaper(g.itemKey, g.title, 0, false, '', activeCwd); return }
             }}
           >Paper chat</button>
           <button
@@ -439,7 +445,7 @@ export function ChatWindow(): JSX.Element {
               📚 文献库对话（{libraryConvs.length}）
             </div>
             {libraryConvs.length === 0 ? (
-              <div className="side-item" onClick={() => void openLibrary('', '', 0, true)}>
+              <div className="side-item" onClick={() => void openLibrary('', activeCwd, 0, true)}>
                 <span className="side-txt">💬 第1次（没有）— 点击新建</span>
               </div>
             ) : null}
@@ -447,7 +453,7 @@ export function ChatWindow(): JSX.Element {
               <div
                 key={c.sessionId}
                 className={`side-item ${active?.kind === 'library' && active.seq === c.seq ? 'on' : ''}`}
-                onClick={() => void openLibrary('', '', c.seq, false)}
+                onClick={() => void openLibrary('', activeCwd, c.seq, false)}
                 title={`文献库对话 · 第${c.seq}次`}
               >
                 <span className="side-txt">💬 第{c.seq}次 · {new Date(c.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
@@ -468,7 +474,7 @@ export function ChatWindow(): JSX.Element {
                 <div
                   key={c.sessionId}
                   className={`side-item ${active?.kind === 'paper' && active.itemKey === g.itemKey && active.seq === c.seq ? 'on' : ''}`}
-                  onClick={() => void openPaper(g.itemKey, c.title, c.seq, false, '', '')}
+                  onClick={() => void openPaper(g.itemKey, c.title, c.seq, false, '', activeCwd)}
                   title={`${c.title} · 第${c.seq}次对话`}
                 >
                   <span className="side-txt">💬 第{c.seq}次 · {new Date(c.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>

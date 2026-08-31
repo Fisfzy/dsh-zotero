@@ -294,6 +294,18 @@ async function ensureLiveAgent(
   console.log(`[dsh-zotero] ensureLive ${sessionId} after-controller live=${live ? String((live as any).status ?? '?') : 'none'}`)
   if (live) { grantFullAccess(deps, live); restrictTools(live); return live }
   if (!agents) throw new Error('agents 服务不可用')
+  // 工作区归属冲突/已持久化会话：优先 resume（用持久化归属），避免硬 create 与现有状态打架。
+  if (agents.resume) {
+    try {
+      const handle = await agents.resume({ resumeSessionId: sessionId, signal: AbortSignal.timeout(20000) })
+      console.log(`[dsh-zotero] ensureLive ${sessionId} resumed status=${String((handle.agent as any).status ?? '?')}`)
+      grantFullAccess(deps, handle.agent)
+      restrictTools(handle.agent)
+      return handle.agent
+    } catch (err: unknown) {
+      console.log(`[dsh-zotero] ensureLive ${sessionId} resume failed: ${String((err as Error)?.message ?? err)}`)
+    }
+  }
   if (agents.create) {
     try {
       const handle = await agents.create({
@@ -309,19 +321,7 @@ async function ensureLiveAgent(
       console.log(`[dsh-zotero] ensureLive ${sessionId} create failed: ${String((err as Error)?.message ?? err)}`)
     }
   }
-  if (agents.resume) {
-    try {
-      const handle = await agents.resume({ resumeSessionId: sessionId, signal: AbortSignal.timeout(20000) })
-      console.log(`[dsh-zotero] ensureLive ${sessionId} resumed status=${String((handle.agent as any).status ?? '?')}`)
-      grantFullAccess(deps, handle.agent)
-      restrictTools(handle.agent)
-      return handle.agent
-    } catch (err: unknown) {
-      console.log(`[dsh-zotero] ensureLive ${sessionId} resume failed: ${String((err as Error)?.message ?? err)}`)
-      throw new Error(`文献会话激活失败: ${String((err as Error)?.message ?? err)}`)
-    }
-  }
-  throw new Error('agents 服务不可用（create/resume 均缺失）')
+  throw new Error(`文献会话激活失败: ${sessionId}`)
 }
 
 function injectText(agent: AgentLike, text: string): void {
@@ -349,16 +349,28 @@ async function deliverChatMessage(deps: PanelApiDeps, sessionId: string, text: s
     | { prompt?(req: { sessionId: string; mode: string; content: Array<{ type: string; text: string }>; requestId: string }, signal?: AbortSignal): Promise<unknown> }
     | undefined
   if (sc?.prompt) {
+    // 先清一次遗留 pending（历史 stale 消息常导致 "already pending" 卡死）。
     try {
-      await sc.prompt({
-        sessionId,
-        mode: 'queue',
-        content: [{ type: 'text', text }],
-        requestId: `dshz-${crypto.randomUUID()}`,
-      }, AbortSignal.timeout(10000))
-      return 'controller'
-    } catch (err: unknown) {
-      console.log(`[dsh-zotero] prompt via controller failed (${sessionId}): ${String((err as Error)?.message ?? err)}`)
+      const existing = agentsOf(deps)?.get(sessionId)
+      if (existing?.cancel) existing.cancel({ kind: 'user' }, { keepInbox: false })
+    } catch { /* best-effort */ }
+    // 首轮可能因 agent 刚 create 仍处初始化锁（"already pending"），短退避后重试一次。
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await sc.prompt({
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text }],
+          requestId: `dshz-${crypto.randomUUID()}`,
+        }, AbortSignal.timeout(10000))
+        return 'controller'
+      } catch (err: unknown) {
+        const msg = String((err as Error)?.message ?? err)
+        const isPending = /already pending|is pending/i.test(msg)
+        console.log(`[dsh-zotero] prompt via controller failed (${sessionId}) attempt=${attempt}: ${msg}`)
+        if (!isPending || attempt === 1) break
+        await new Promise((r) => setTimeout(r, 400))
+      }
     }
   }
   const agents = agentsOf(deps)
@@ -547,8 +559,19 @@ export async function sendChatMessage(
       const mode = p.mode === 'pdf' ? (useRag && text ? 'rag' : 'qa') : 'meta'
       const built = await buildPaperContext(deps, { ...body, itemKey, mode, ...(mode === 'rag' ? { query: text } : {}) })
       if (built.ok) {
-        injectText(agent, built.text)
-        chars += built.chars
+        // agent.inject 对「正在消费的注入」会报 already pending（open 已注入正文而未消费时二次注入触发）。
+        // 此时跳过重复注入，只发用户消息；会话上下文里已有元数据/可调工具。
+        try {
+          injectText(agent, built.text)
+          chars += built.chars
+        } catch (err: unknown) {
+          const m = String((err as Error)?.message ?? err)
+          if (/already pending|is pending/i.test(m)) {
+            console.log(`[dsh-zotero] skip inject for ${itemKey} (pending): ${m}`)
+          } else {
+            throw err
+          }
+        }
       }
     }
     const via = await deliverChatMessage(deps, sessionId, text)
