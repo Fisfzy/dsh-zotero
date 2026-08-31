@@ -4,17 +4,20 @@
  * SECTION_BOOST_PROFILES / scoreEvidenceHeuristics；AGPL-3.0 出处见 docs/M0-audit.md）。
  *
  * 打分信号：
- *   1. BM25 词法分（k1=1.2, b=0.75）；
+ *   1. BM25 词法分（k1=1.2, b=0.75）——支持按查询计划（原查询+变体 terms）联合打分；
  *   2. 查询意图检测 → 章节 boost（问方法→methods +1.5，问数据→results +1.5，
  *      general 时 references -2.4 等）；
  *   3. 引用 boost（论文引用句命中 +10，相邻块 +0.35）；
  *   4. 启发式修正（短块/引用列表/无 anchor 文本减分）。
- * 本实现为纯词法版（无 embedding）；RRF 融合留接口，后续可接 wave-rag dense 通道。
+ * 本实现为纯词法版（无 embedding）；RRF 融合接口 + MMR 多样性去重已内置，
+ * 多通道（如后续 wave-rag dense）可接入 HybridRanker。
  */
 
 import type { ChunkIndex, ChunkMeta } from './indexer.ts'
+import type { RetrievalQueryPlan } from './queryPlan.ts'
 
 export const RRF_K = 60
+export const MMR_LAMBDA = 0.7
 
 /* ── 意图检测（移植上游 detectQueryIntent） ─────────────────────────────── */
 
@@ -101,21 +104,40 @@ interface EvidenceCandidate {
 
 /**
  * 对块做最终证据排序。
- * @param intent query 意图（决定章节 boost）
- * @param referenceMatches 命中「文献引用句」的块索引（如 "@Smith2020" 语义，简版传空数组）
+ * @param queryPlan 可选的查询计划：变体 terms 联合打分（原词+同义/缩写/notation）。
+ * @param referenceChunkIndexes 命中「论文引用句」的块索引（如 "@Smith2020"），high 置信 +10、相邻 ±1 块 +0.35。
+ * @param options.dedupe MMR 多样性去重（默认开）。
  */
 export function rankEvidenceCandidates(
   index: ChunkIndex,
   query: string,
-  options: { topK?: number; preferredFirst?: boolean } = {},
+  options: {
+    topK?: number
+    queryPlan?: RetrievalQueryPlan
+    referenceChunkIndexes?: number[]
+    dedupe?: boolean
+  } = {},
 ): EvidenceCandidate[] {
   const topK = Math.max(1, options.topK ?? 5)
-  const terms = Array.from(new Set(query.toLowerCase().split(/\s+/).map((t) => t.trim()).filter((t) => t.length > 1)))
+  const plan = options.queryPlan
+  // 词法 terms：优先用查询计划（原查询+变体去重），无计划则原查询切词。
+  const terms = Array.from(new Set(
+    (plan?.lexicalTerms?.length ? plan.lexicalTerms : query.toLowerCase().split(/\s+/).map((t) => t.trim()).filter((t) => t.length > 1)),
+  ))
   const intent = detectQueryIntent(query)
+  const highConf = new Set(options.referenceChunkIndexes ?? [])
+  const neighbors = new Set<number>()
+  for (const ci of highConf) {
+    if (ci > 0) neighbors.add(ci - 1)
+    if (ci + 1 < index.chunks.length) neighbors.add(ci + 1)
+  }
 
   const scored: Array<{ idx: number; score: number }> = []
   for (const stat of index.chunkStats) {
     let score = scoreChunkBM25(stat, terms, index.docFreq, index.chunks.length, index.avgChunkLength)
+    if (highConf.has(stat.index)) score += 10
+    else if (neighbors.has(stat.index)) score += 0.35
+
     const meta = index.meta[stat.index]
     const kind = classifyChunkKind(meta?.sectionLabel ?? '')
     const boost = SECTION_BOOST_PROFILES[intent]?.[kind] ?? 0
@@ -135,13 +157,82 @@ export function rankEvidenceCandidates(
     return a.idx - b.idx
   })
 
-  return scored.slice(0, topK).map((s) => ({
+  let selected = scored.slice(0, topK)
+
+  // body 保底：evidence 模式下若选中块全是 abstract/figure/table/references 等，
+  // 补一个 body 段（上游 isBodyEvidenceSection 语义）。
+  if (selected.length && !selected.some((s) => isBodyEvidenceSection(index.meta[s.idx]?.sectionLabel ?? ''))) {
+    const bodyEntry = scored.find((s) => isBodyEvidenceSection(index.meta[s.idx]?.sectionLabel ?? ''))
+    if (bodyEntry && !selected.includes(bodyEntry)) {
+      selected[selected.length - 1] = bodyEntry
+    }
+  }
+
+  // MMR 多样性去重：选块时惩罚与已选块文本重合度过高的候选（λ=0.7）。
+  if (options.dedupe !== false) {
+    selected = mmrSelect(selected, scored, index.chunks, topK)
+  }
+
+  return selected.map((s) => ({
     chunkIndex: s.idx,
     sectionLabel: index.meta[s.idx]?.sectionLabel ?? '',
     chunkText: index.chunks[s.idx],
-    bm25Score: s.score,
+    bm25Score: Math.round(s.score * 100) / 100,
     meta: index.meta[s.idx],
   }))
+}
+
+/** Body 类段（正文证据可引用区）；非标题/图注/表格/引用表/附录即视为 body。 */
+function isBodyEvidenceSection(sectionLabel: string): boolean {
+  const kind = classifyChunkKind(sectionLabel)
+  return kind === 'body' || kind === 'results' || kind === 'discussion' || kind === 'methods' || kind === 'conclusion'
+}
+
+/** 两个文本的 Jaccard token 重合度（MMR 多样性度量；纯词法，无 embedding）。 */
+function jaccardTokens(a: string, b: string): number {
+  const ta = new Set((a || '').toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/).filter((t) => t.length > 2))
+  const tb = new Set((b || '').toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/).filter((t) => t.length > 2))
+  if (!ta.size || !tb.size) return 0
+  let inter = 0
+  for (const t of ta) if (tb.has(t)) inter += 1
+  return inter / Math.min(ta.size, tb.size)
+}
+
+/** 贪心 MMR：每步选「相关性 − λ × 与已选集最大相似度」最高的候选。
+ * 返回保持原始相关性得分（bm25Score 展示用），顺序为 MMR 精选序。 */
+function mmrSelect(
+  candidates: Array<{ idx: number; score: number }>,
+  allScored: Array<{ idx: number; score: number }>,
+  chunks: string[],
+  topK: number,
+): Array<{ idx: number; score: number }> {
+  const remaining = new Map<number, number>()
+  for (const c of candidates) remaining.set(c.idx, c.score)
+  // 若候选不够 topK（原始 topK 截断导致），从全量补足。
+  for (const c of allScored) {
+    if (remaining.size >= topK) break
+    if (!remaining.has(c.idx)) remaining.set(c.idx, c.score - 2)
+  }
+  const rawScores = new Map(remaining)
+  const selected: number[] = []
+  while (selected.length < topK && remaining.size) {
+    let bestIdx = -1
+    let bestVal = -Infinity
+    for (const [idx] of remaining) {
+      const score = rawScores.get(idx) ?? 0
+      let simMax = 0
+      for (const s of selected) {
+        const sim = jaccardTokens(chunks[idx], chunks[s])
+        if (sim > simMax) simMax = sim
+      }
+      const val = score - MMR_LAMBDA * simMax
+      if (val > bestVal) { bestVal = val; bestIdx = idx }
+    }
+    if (bestIdx < 0) break
+    selected.push(bestIdx)
+    remaining.delete(bestIdx)
+  }
+  return selected.map((idx) => ({ idx, score: rawScores.get(idx) ?? 0 }))
 }
 
 /* ── RRF 融合（与 wave-rag retrieval/bm25.ts rrfFuse 同构，供未来 dense 通道） ── */

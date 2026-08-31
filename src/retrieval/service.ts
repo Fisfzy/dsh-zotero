@@ -1,7 +1,7 @@
 /**
  * dsh-zotero — retrieval/service.ts：论文内证据检索服务。
  *
- * 组合 indexer（分块索引）+ rank（BM25/意图/章节 boost/启发式），
+ * 组合 indexer（分块索引）+ rank（BM25/意图/章节 boost/启发式/MMR）+ queryPlan（查询改写），
  * 供两类消费者复用：
  *   - 工具层 `zotero_retrieve`（模型按需检索章节证据）
  *   - 注入层 buildPaperContext（qa 打开时检索召回证据片段进上下文）
@@ -10,9 +10,14 @@
  * 避免模型追问时重复检索（对应上游 RetrievalService.evidenceCache）。
  * 索引本身按 attachmentKey 内存缓存（full.md 读取一次、多次检索）。
  */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 import { buildChunkIndex, charOffsetOf, type ChunkIndex } from './indexer.ts'
 import { rankEvidenceCandidates } from './rank.ts'
+import { buildRetrievalQueryPlan, isPlainReadCommand, planCacheKey, resolveQueryPlanWithLLM, type RetrievalQueryPlan } from './queryPlan.ts'
+import { resolveCacheDir } from '../mineru/cache.ts'
+import { currentConfig } from '../runtime.ts'
 
 /** 检索服务只依赖解析产物的最小形状（避免与 tools-m2 的 ParsedPaper 直接耦合）。 */
 export interface ParsedForRetrieval {
@@ -28,6 +33,8 @@ export interface RetrievedEvidence {
   title: string
   query: string
   intent: string
+  /** 查询改写变体（LLM 生成；确定性 fallback 时为空数组）。 */
+  variants: string[]
   /** top 证据块（按序）。 */
   hits: Array<{
     chunkIndex: number
@@ -67,11 +74,19 @@ export function clearRetrievalCaches(): void {
   evidenceCache.clear()
 }
 
-/** 用已解析全文检索证据（不重新解析；解析交给调用方 ensureParsed）。 */
+/** 用已解析全文检索证据（不重新解析；解析交给调用方 ensureParsed）。
+ * options.runVariantGen 存在时尝试 LLM 查询改写（失败自动确定性 fallback）；否则跳过改写。 */
 export async function retrieveEvidence(
   parsed: ParsedForRetrieval,
   query: string,
-  options: { topK?: number } = {},
+  options: {
+    topK?: number
+    /** 查询变体生成器（如 ml.ts streamText 封装；返回变体数组或 null）。 */
+    runVariantGen?: (q: { query: string; paperTitle?: string }) => Promise<string[] | null>
+    /** 外部传入的查询计划（引用解析/前缀注入等场景复用，避免重复改写）。 */
+    queryPlan?: RetrievalQueryPlan
+    signal?: AbortSignal
+  } = {},
 ): Promise<RetrievedEvidence> {
   const t0 = Date.now()
   const topK = Math.max(1, Math.min(options.topK ?? 5, 12))
@@ -83,13 +98,33 @@ export async function retrieveEvidence(
     return { ...hit, cached: true, latencyMs: Date.now() - t0 }
   }
 
+  // 查询改写：外部计划 > 磁盘缓存计划 > LLM 生成（失败降级）> 确定性计划。
+  let plan = options.queryPlan
+  if (!plan && query.trim()) {
+    plan = loadPlanCache(query) ?? buildRetrievalQueryPlan(query)
+    if (options.runVariantGen && !plan.variants.length) {
+      if (!isPlainReadCommand(query)) {
+        const variants = await resolveQueryPlanWithLLM({
+          runner: options.runVariantGen,
+          query,
+          paperTitle: parsed.title,
+        })
+        if (variants?.length) {
+          plan = buildRetrievalQueryPlan(query, { variants })
+          savePlanCache(query, plan)
+        }
+      }
+    }
+  }
+  if (!plan) plan = buildRetrievalQueryPlan(query)
+
   let index = indexCache.get(attachmentKey)
   if (!index || index.chunks.length === 0) {
     index = buildChunkIndex(md)
     indexCache.set(attachmentKey, index)
   }
 
-  const ranked = rankEvidenceCandidates(index, query, { topK })
+  const ranked = rankEvidenceCandidates(index, query, { topK, queryPlan: plan })
   const hits = ranked.map((r) => {
     const offset = charOffsetOf(md, r.meta?.startLine ?? 1)
     return {
@@ -108,6 +143,7 @@ export async function retrieveEvidence(
     title: parsed.title,
     query,
     intent: detectIntentLabel(query),
+    variants: plan?.variants ?? [],
     hits,
     totalChunks: index.chunks.length,
     textChars: md.length,
@@ -124,6 +160,44 @@ export async function retrieveEvidence(
   return result
 }
 
+/* ── 查询计划磁盘缓存（cacheDir/queryplans.json） ───────────────────────── */
+
+interface PlanCacheEntry { variants: string[]; at: number }
+
+function planCacheFile(): string {
+  return join(resolveCacheDir(currentConfig()), 'queryplans.json')
+}
+
+function loadPlanCache(query: string): RetrievalQueryPlan | undefined {
+  try {
+    const f = planCacheFile()
+    if (!existsSync(f)) return undefined
+    const all = JSON.parse(readFileSync(f, 'utf8')) as Record<string, PlanCacheEntry>
+    const e = all[planCacheKey(query)]
+    if (e && Array.isArray(e.variants) && e.variants.length) {
+      return buildRetrievalQueryPlan(query, { variants: e.variants })
+    }
+  } catch { /* best-effort */ }
+  return undefined
+}
+
+function savePlanCache(query: string, plan: RetrievalQueryPlan): void {
+  try {
+    const f = planCacheFile()
+    let all: Record<string, PlanCacheEntry> = {}
+    try { if (existsSync(f)) all = JSON.parse(readFileSync(f, 'utf8')) } catch { /* rebuild */ }
+    // 上限 300 条，清最旧的。
+    const keys = Object.keys(all)
+    if (keys.length >= 300) {
+      const sorted = keys.sort((a, b) => (all[a]?.at ?? 0) - (all[b]?.at ?? 0))
+      for (const k of sorted.slice(0, keys.length - 299)) delete all[k]
+    }
+    all[planCacheKey(query)] = { variants: plan.variants, at: Date.now() }
+    mkdirSync(join(f, '..'), { recursive: true })
+    writeFileSync(f, JSON.stringify(all), 'utf8')
+  } catch { /* best-effort */ }
+}
+
 function detectIntentLabel(query: string): string {
   // 简短导出意图标签，避免 rank.ts 的类型依赖（保持返回纯 JSON）。
   const q = query.toLowerCase()
@@ -136,9 +210,30 @@ function detectIntentLabel(query: string): string {
   return 'general'
 }
 
-/** 单条证据块的渲染文本（带章节/页码前缀，供注入与工具输出）。 */
-export function formatEvidenceHit(hit: RetrievedEvidence['hits'][number], budgetChars: number): string {
-  const head = hit.sectionLabel ? `## ${hit.sectionLabel}\n` : ''
+/** 单条证据块的渲染文本（带章节/页码前缀，供注入与工具输出）。
+ * P4 证据打包：块头 = sectionLabel + chunk 序号 + score + offset，正文带截断。 */
+export function formatEvidenceHit(hit: RetrievedEvidence['hits'][number], budgetChars: number, index = 0): string {
+  const head = [
+    hit.sectionLabel && hit.sectionLabel !== '(全文)' ? `## ${hit.sectionLabel}` : '',
+    `[chunk #${hit.chunkIndex}, score ${hit.score}, offset ${hit.offset}]`,
+  ].filter(Boolean).join(' ')
   const body = hit.text.slice(0, Math.max(800, budgetChars))
-  return `${head}${body}`
+  return `${head ? `${head}\n` : ''}${body}`
+}
+
+/** P4 证据打包：检索结果 → 注入文本（覆盖 ledger + 命中块列表）。 */
+export function formatEvidencePack(res: RetrievedEvidence, options: { budgetPerHit?: number; maxHits?: number } = {}): string {
+  const budgetPerHit = Math.max(800, options.budgetPerHit ?? 1400)
+  const maxHits = Math.max(1, options.maxHits ?? res.hits.length)
+  const lines: string[] = []
+  lines.push(`【检索证据 · 针对问题「${res.query.slice(0, 120)}」】`)
+  lines.push(`(命中 ${res.hits.length}/${res.totalChunks} 块, 意图 ${res.intent}, 用时 ${res.latencyMs}ms${res.cached ? '，缓存' : ''}${res.variants.length ? `，改写变体 ${res.variants.length} 条` : ''})`)
+  if (!res.hits.length) {
+    lines.push('（无显著命中——可改用 zotero_read_fulltext 顺序精读或 zotero_summarize）')
+  }
+  for (const [i, h] of res.hits.slice(0, maxHits).entries()) {
+    lines.push(`\n${formatEvidenceHit(h, budgetPerHit, i)}`)
+  }
+  lines.push('\n[检索覆盖说明] 检索基于全部分块(' + res.totalChunks + ' 块, ' + res.textChars + ' 字符)，命中按相关性排序；引用时请标注章节标签。')
+  return lines.join('\n')
 }

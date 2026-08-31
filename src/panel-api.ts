@@ -46,7 +46,8 @@ import {
   startMineruBatch,
   testMineruConnection,
 } from './mineru-manager.ts'
-import { retrieveEvidence } from './retrieval/service.ts'
+import { retrieveEvidence, formatEvidencePack } from './retrieval/service.ts'
+import { resolveModel, streamText } from './ml.ts'
 import { composeConfig, currentConfig, setActiveConfig, writeOverlay } from './runtime.ts'
 
 export const PLUGIN_ID = '@dsh-external/dsh-zotero'
@@ -1087,15 +1088,28 @@ async function buildPaperContext(deps: PanelApiDeps, body: Record<string, unknow
     try {
       const parsed = await ensureParsed(client, cfg, 'auto', itemKey, String(body.attachmentKey ?? '') || undefined)
       if (query) {
-        const res = await retrieveEvidence(parsed, query, { topK: Number(body.retrieveTopK ?? 4) })
-        lines.push(`【检索证据 · 针对问题「${query.slice(0, 120)}」】(命中 ${res.hits.length}/${res.totalChunks} 块，意图 ${res.intent}，用时 ${res.latencyMs}ms${res.cached ? '，缓存' : ''})`)
-        if (res.hits.length === 0) {
-          lines.push('（无显著命中——可改用 zotero_read_fulltext 顺序精读或 zotero_summarize）')
-        }
-        for (const h of res.hits) {
-          const head = h.sectionLabel ? `## ${h.sectionLabel}（chunk #${h.chunkIndex}, score ${h.score}, offset ${h.offset}）` : `## chunk #${h.chunkIndex}`
-          lines.push(`\n${head}\n${h.text}`)
-        }
+        const res = await retrieveEvidence(parsed, query, {
+          topK: Number(body.retrieveTopK ?? 4),
+          runVariantGen: deps.agentDefaultModel
+            ? async (q) => {
+                const model = resolveModel(deps.agentDefaultModel)
+                const system = 'You are a retrieval query planner for academic papers. Expand the user question into up to 6 alternative query phrasings for evidence search: synonyms, abbreviations vs full forms (e.g. "PD" ↔ "peridynamics"), notation and English variants of technical terms. Keep each variant a single search query under 120 chars. Output one variant per line, no numbering, no preamble, no quotes.'
+                const out = await streamText(deps.llm, model, {
+                  system,
+                  user: `Paper: ${String(q.paperTitle ?? '(unknown)')}\nQuestion: ${q.query}`,
+                  temperature: 0.2,
+                  maxTokens: 400,
+                })
+                return out
+                  .split('\n')
+                  .map((l) => l.trim())
+                  .filter((l) => l && !/^\d+[.)]/.test(l) && !/^(v\d|variant)/i.test(l))
+                  .map((l) => l.replace(/^[-•*]\s*/, '').replace(/^['"]|['"]$/g, ''))
+                  .filter((l) => l.length >= 2)
+              }
+            : undefined,
+        })
+        lines.push(formatEvidencePack(res, { budgetPerHit: 1400, maxHits: Number(body.retrieveTopK ?? 4) }))
       } else {
         // 无具体问题 → 回退头部节选。
         lines.push('【全文节选（缓存文本；追问具体问题时将自动按检索召回注入）】')

@@ -447,6 +447,7 @@ export function registerM2Tools(
             title: { type: 'string', required: true },
             query: { type: 'string', required: true },
             intent: { type: 'string', required: true },
+            variants: { type: 'array', required: true, items: { type: 'string' } },
             hits: {
               type: 'array', required: true,
               items: {
@@ -476,16 +477,38 @@ export function registerM2Tools(
         const a = args as { itemKey: string; query: string; attachmentKey?: string; topK?: number }
         const fail = (error: string) => ({
           status: 'error' as const, itemKey: a.itemKey, title: '', query: a.query ?? '',
-          intent: '', hits: [], totalChunks: 0, textChars: 0, latencyMs: 0, cached: false,
+          intent: '', variants: [] as string[], hits: [], totalChunks: 0, textChars: 0, latencyMs: 0, cached: false,
           error, hint: '可先 zotero_read_pdf 确认解析可用，或用 zotero_read_fulltext 顺序精读',
         })
         try {
           if (!a.query?.trim()) return fail('需要 query')
           const parsed = await ensureParsed(client, cfg, 'auto', a.itemKey, a.attachmentKey, exec)
-          const res = await retrieveEvidence(parsed, a.query, { topK: a.topK })
+          const res = await retrieveEvidence(parsed, a.query, {
+            topK: a.topK,
+            runVariantGen: agentDefaultModel
+              ? async (q) => {
+                  const model = resolveModel(agentDefaultModel)
+                  const system = 'You are a retrieval query planner for academic papers. Expand the user question into up to 6 alternative query phrasings for evidence search: synonyms, abbreviations vs full forms (e.g. "PD" ↔ "peridynamics"), notation and English variants of technical terms. Keep each variant a single search query under 120 chars. Output one variant per line, no numbering, no preamble, no quotes.'
+                  const out = await streamText(llm, model, {
+                    system,
+                    user: `Paper: ${String(q.paperTitle ?? '(unknown)')}\nQuestion: ${q.query}`,
+                    temperature: 0.2,
+                    maxTokens: 400,
+                    signal: exec?.signal,
+                  })
+                  return out
+                    .split('\n')
+                    .map((l) => l.trim())
+                    .filter((l) => l && !/^\d+[.)]/.test(l) && !/^(v\d|variant)/i.test(l))
+                    .map((l) => l.replace(/^[-•*]\s*/, '').replace(/^['"]|['"]$/g, ''))
+                    .filter((l) => l.length >= 2)
+                }
+              : undefined,
+            signal: exec?.signal,
+          })
           return {
             status: 'ok', itemKey: a.itemKey, title: parsed.title, query: res.query,
-            intent: res.intent, hits: res.hits, totalChunks: res.totalChunks,
+            intent: res.intent, variants: res.variants, hits: res.hits, totalChunks: res.totalChunks,
             textChars: res.textChars, latencyMs: res.latencyMs, cached: res.cached,
             error: '', hint: '',
           }
