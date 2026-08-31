@@ -741,9 +741,6 @@ async function handle(
       if (path === '/mineru/job') {
         return send(res, 200, { ok: true, job: mineruJob() })
       }
-      if (path === '/mineru/test') {
-        return send(res, 200, await testMineruConnection())
-      }
     }
 
     if (req.method === 'POST') {
@@ -829,6 +826,9 @@ async function handle(
       }
       if (path === '/mineru/clear') {
         return send(res, 200, clearMineruCache())
+      }
+      if (path === '/mineru/test') {
+        return send(res, 200, await testMineruConnection())
       }
       if (path === '/artifacts') {
         const artifact = body as { type?: string; title?: string; payload?: string }
